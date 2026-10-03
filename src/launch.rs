@@ -31,7 +31,7 @@ extern "C" {}
 const AGENT_LABEL: &str = "com.clipassistant.app";
 
 /// Env flag set by the LaunchAgent so the process knows it was auto-started.
-pub const AUTOSTART_ENV: &str = "CLIPPIN_AUTOSTART";
+pub const AUTOSTART_ENV: &str = "CLIP_ASSISTANT_AUTOSTART";
 
 /// Status from `SMAppService.status` (ServiceManagement), plus LaunchAgent mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

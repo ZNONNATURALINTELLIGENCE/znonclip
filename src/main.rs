@@ -121,7 +121,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
     let mut cmd = Command::new(&exe);
     cmd.args(child_args);
     cmd.stdin(Stdio::null());
-    cmd.env_remove("CLIPPIN_DETACH_CHILD"); // clean slate
+    cmd.env_remove("CLIP_ASSISTANT_DETACH_CHILD"); // clean slate
 
     // Prefer a log file so detached runs are still diagnosable.
     match open_detach_log() {
