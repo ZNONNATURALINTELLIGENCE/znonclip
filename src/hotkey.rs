@@ -1,10 +1,17 @@
-//! Global hotkey registration (configurable presets, default **Cmd+Shift+V**).
+//! Global hotkey (configurable presets, default **Cmd+Shift+V**) and popover keys.
 //!
-//! Uses `NSEvent` global + local monitors. Global monitors observe only;
-//! local monitors can swallow the keystroke when Clip Assistant is key.
+//! The global hotkey uses Carbon `RegisterEventHotKey`. Unlike an `NSEvent`
+//! global key monitor (which upstream ClipPin used), it needs **no**
+//! Accessibility or Input Monitoring permission, so the menu opens from the
+//! keyboard on a fresh install. The hotkey is consumed: the frontmost app does
+//! not also receive it.
+//!
+//! A separate `NSEvent` *local* monitor (no permission needed either) handles
+//! ↑ / ↓ / Enter / Esc while our popover has focus.
 
+use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use block2::RcBlock;
 use log::{info, warn};
@@ -15,42 +22,143 @@ use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
 
 use crate::settings::HotkeyPreset;
 
-/// Active hotkey key code (updated when user changes preset).
-static ACTIVE_KEY_CODE: AtomicU16 = AtomicU16::new(0x09);
-/// Active modifier flags (device-independent bits as u64).
-static ACTIVE_MODIFIERS: AtomicU64 = AtomicU64::new(
-    (NSEventModifierFlags::Command.bits() | NSEventModifierFlags::Shift.bits()) as u64,
-);
+// ── Carbon FFI (HIToolbox) ──────────────────────────────────────────────────
 
-/// Holds strong refs to event monitors so they stay registered.
+type OSStatus = i32;
+type EventTargetRef = *mut c_void;
+type EventHandlerRef = *mut c_void;
+type EventHandlerCallRef = *mut c_void;
+type EventRef = *mut c_void;
+type EventHotKeyRef = *mut c_void;
+type EventHandlerUPP =
+    extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus;
+
+#[repr(C)]
+struct EventTypeSpec {
+    event_class: u32,
+    event_kind: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EventHotKeyID {
+    signature: u32,
+    id: u32,
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn GetApplicationEventTarget() -> EventTargetRef;
+    fn InstallEventHandler(
+        target: EventTargetRef,
+        handler: EventHandlerUPP,
+        num_types: u32,
+        list: *const EventTypeSpec,
+        user_data: *mut c_void,
+        out_ref: *mut EventHandlerRef,
+    ) -> OSStatus;
+    fn RegisterEventHotKey(
+        key_code: u32,
+        modifiers: u32,
+        id: EventHotKeyID,
+        target: EventTargetRef,
+        options: u32,
+        out_ref: *mut EventHotKeyRef,
+    ) -> OSStatus;
+    fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OSStatus;
+}
+
+/// `kEventClassKeyboard` ('keyb').
+const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
+/// `kEventHotKeyPressed`.
+const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
+/// Carbon modifier masks (`Events.h`).
+const CMD_KEY: u32 = 1 << 8;
+const SHIFT_KEY: u32 = 1 << 9;
+const OPTION_KEY: u32 = 1 << 11;
+const CONTROL_KEY: u32 = 1 << 12;
+/// Hotkey signature ('CLAS').
+const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"CLAS");
+
+/// The Carbon handler is installed once per process.
+static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn hotkey_pressed(_: EventHandlerCallRef, _: EventRef, _: *mut c_void) -> OSStatus {
+    dispatch_hotkey_to_delegate();
+    0 // noErr
+}
+
+fn carbon_modifiers(preset: HotkeyPreset) -> u32 {
+    match preset {
+        HotkeyPreset::CmdShiftV | HotkeyPreset::CmdShiftC => CMD_KEY | SHIFT_KEY,
+        HotkeyPreset::CmdOptionV => CMD_KEY | OPTION_KEY,
+        HotkeyPreset::CtrlShiftV => CONTROL_KEY | SHIFT_KEY,
+    }
+}
+
+// ── Manager ────────────────────────────────────────────────────────────────
+
+/// Owns the Carbon hotkey registration and the popover-key local monitor.
 pub struct HotkeyManager {
-    global_monitor: Option<Retained<AnyObject>>,
+    hot_key: EventHotKeyRef,
     local_monitor: Option<Retained<AnyObject>>,
-    _global_block: Option<RcBlock<dyn Fn(NonNull<NSEvent>)>>,
     _local_block: Option<RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent>>,
-    #[allow(dead_code)]
-    preset: HotkeyPreset,
 }
 
 impl HotkeyManager {
-    /// Register monitors for the given preset.
+    /// Register the global hotkey for `preset` plus the popover-key monitor.
     pub fn register(preset: HotkeyPreset, _mtm: MainThreadMarker) -> Self {
-        apply_preset(preset);
-
-        let global_block = RcBlock::new(|event: NonNull<NSEvent>| {
-            // SAFETY: NSEvent pointer from AppKit is valid for the call.
-            let event = unsafe { event.as_ref() };
-            if is_active_hotkey(event) {
-                dispatch_hotkey_to_delegate();
+        // SAFETY: Carbon calls on the main thread; spec array outlives the call.
+        unsafe {
+            if !HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
+                let spec = EventTypeSpec {
+                    event_class: K_EVENT_CLASS_KEYBOARD,
+                    event_kind: K_EVENT_HOT_KEY_PRESSED,
+                };
+                let status = InstallEventHandler(
+                    GetApplicationEventTarget(),
+                    hotkey_pressed,
+                    1,
+                    &spec,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                if status != 0 {
+                    warn!("InstallEventHandler failed: OSStatus {status}");
+                    HANDLER_INSTALLED.store(false, Ordering::SeqCst);
+                }
             }
-        });
+        }
+
+        let mut hot_key: EventHotKeyRef = std::ptr::null_mut();
+        // SAFETY: valid out-pointer; target is the application event target.
+        let status = unsafe {
+            RegisterEventHotKey(
+                preset.key_code() as u32,
+                carbon_modifiers(preset),
+                EventHotKeyID {
+                    signature: HOTKEY_SIGNATURE,
+                    id: 1,
+                },
+                GetApplicationEventTarget(),
+                0,
+                &mut hot_key,
+            )
+        };
+        if status == 0 {
+            info!("global hotkey registered: {} (Carbon, no permission needed)", preset.display());
+        } else {
+            // -9878 = eventHotKeyExistsErr: another app owns this combination.
+            warn!(
+                "RegisterEventHotKey {} failed: OSStatus {status}{}",
+                preset.display(),
+                if status == -9878 { " (combination taken by another app)" } else { "" }
+            );
+            hot_key = std::ptr::null_mut();
+        }
 
         let local_block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
             let event_ref = unsafe { event.as_ref() };
-            if is_active_hotkey(event_ref) {
-                dispatch_hotkey_to_delegate();
-                return std::ptr::null_mut();
-            }
             // Popover keyboard navigation (arrows / Enter / Esc), only when no
             // command-style modifier is held so ⌘A, ⌘C etc. keep working.
             if is_nav_key(event_ref) && dispatch_nav_key_to_delegate(event_ref.keyCode()) {
@@ -58,35 +166,22 @@ impl HotkeyManager {
             }
             event.as_ptr()
         });
-
-        let mask = NSEventMask::KeyDown;
-
-        let global_monitor =
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_block);
-        if global_monitor.is_none() {
-            warn!("failed to register global hotkey monitor");
-        } else {
-            info!("global hotkey registered: {}", preset.display());
-        }
-
         // SAFETY: block returns valid NSEvent* or null.
         let local_monitor = unsafe {
-            NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_block)
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &local_block)
         };
         if local_monitor.is_none() {
-            warn!("failed to register local hotkey monitor");
+            warn!("failed to register popover key monitor");
         }
 
         Self {
-            global_monitor,
+            hot_key,
             local_monitor,
-            _global_block: Some(global_block),
             _local_block: Some(local_block),
-            preset,
         }
     }
 
-    /// Drop current monitors and re-register with a new preset.
+    /// Drop current registrations and re-register with a new preset.
     pub fn rebind(self, preset: HotkeyPreset, mtm: MainThreadMarker) -> Self {
         drop(self);
         Self::register(preset, mtm)
@@ -95,8 +190,10 @@ impl HotkeyManager {
 
 impl Drop for HotkeyManager {
     fn drop(&mut self) {
-        if let Some(ref mon) = self.global_monitor.take() {
-            unsafe { NSEvent::removeMonitor(mon) };
+        if !self.hot_key.is_null() {
+            // SAFETY: ref came from RegisterEventHotKey and is unregistered once.
+            unsafe { UnregisterEventHotKey(self.hot_key) };
+            self.hot_key = std::ptr::null_mut();
         }
         if let Some(ref mon) = self.local_monitor.take() {
             unsafe { NSEvent::removeMonitor(mon) };
@@ -104,27 +201,7 @@ impl Drop for HotkeyManager {
     }
 }
 
-fn apply_preset(preset: HotkeyPreset) {
-    ACTIVE_KEY_CODE.store(preset.key_code(), Ordering::Relaxed);
-    let mods = match preset {
-        HotkeyPreset::CmdShiftV | HotkeyPreset::CmdShiftC => {
-            NSEventModifierFlags::Command | NSEventModifierFlags::Shift
-        }
-        HotkeyPreset::CmdOptionV => NSEventModifierFlags::Command | NSEventModifierFlags::Option,
-        HotkeyPreset::CtrlShiftV => NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
-    };
-    ACTIVE_MODIFIERS.store(mods.bits() as u64, Ordering::Relaxed);
-}
-
-fn is_active_hotkey(event: &NSEvent) -> bool {
-    let want_key = ACTIVE_KEY_CODE.load(Ordering::Relaxed);
-    if event.keyCode() != want_key {
-        return false;
-    }
-    let want_mods = ACTIVE_MODIFIERS.load(Ordering::Relaxed);
-    let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
-    flags.bits() as u64 == want_mods
-}
+// ── Popover keys ───────────────────────────────────────────────────────────
 
 /// Key codes the popover handles itself.
 pub const KEY_RETURN: u16 = 36;

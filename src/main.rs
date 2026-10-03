@@ -13,6 +13,7 @@ mod app;
 mod autopaste;
 mod clipboard;
 mod hotkey;
+mod instance;
 mod launch;
 mod predict;
 mod privacy;
@@ -42,10 +43,30 @@ fn main() {
         child_args.remove(pos);
         // Guard: never pass detach through (avoids accidental re-spawn loops).
         child_args.retain(|a| a != "-d" && a != "--detach");
+        // Check (and release) the lock first so the user hears "already running"
+        // instead of a silent second process that exits on its own.
+        if let instance::Acquire::AlreadyRunning = instance::acquire() {
+            eprintln!("clip-assistant: already running (one instance only)");
+            std::process::exit(0);
+        }
         detach_and_exit(&child_args);
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // One instance only: a second launch (terminal, --detach, login agent) exits here.
+    let _instance_lock = match instance::acquire() {
+        instance::Acquire::Acquired(f) => Some(f),
+        instance::Acquire::AlreadyRunning => {
+            info!("another Clip Assistant instance is running — exiting");
+            eprintln!("clip-assistant: already running (one instance only)");
+            return;
+        }
+        instance::Acquire::Unavailable(e) => {
+            log::warn!("single-instance lock unavailable ({e}); continuing");
+            None
+        }
+    };
 
     if env::var_os(launch::AUTOSTART_ENV).is_some() {
         info!("Clip Assistant starting (launchd autostart — no Terminal)");

@@ -549,7 +549,7 @@ pub struct PasteStats {
     pub total: u32,
 }
 
-fn app_support_dir() -> Result<PathBuf> {
+pub(crate) fn app_support_dir() -> Result<PathBuf> {
     // ProjectDirs → ~/Library/Application Support/com.clipassistant.app on macOS
     let dirs = ProjectDirs::from(APP_SUPPORT_QUALIFIER, APP_SUPPORT_ORG, APP_SUPPORT_APP)
         .ok_or(StorageError::NoProjectDirs)?;

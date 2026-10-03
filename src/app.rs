@@ -174,8 +174,7 @@ define_class!(
                 Some(NSEventType::LeftMouseUp) => "status item left click",
                 _ => "status item",
             };
-            info!("popover toggle via {via}");
-            self.toggle_popover_impl();
+            self.toggle_popover_impl(via);
         }
 
         /// Arrow / Enter / Esc while the popover is open. Returns true if consumed.
@@ -224,8 +223,7 @@ define_class!(
         // SAFETY: same as togglePopover:.
         #[unsafe(method(hotkeyTogglePopover:))]
         fn hotkey_toggle_popover(&self, _sender: Option<&AnyObject>) {
-            info!("popover toggle via hotkey");
-            self.toggle_popover_impl();
+            self.toggle_popover_impl("hotkey");
         }
 
         /// Gear button — show/hide settings panel.
@@ -797,7 +795,7 @@ impl ClipAssistantAppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
-    fn toggle_popover_impl(&self) {
+    fn toggle_popover_impl(&self, via: &str) {
         let mtm = self.mtm();
         let target: *const AnyObject = (self as *const Self).cast();
         let opening = self
@@ -806,6 +804,7 @@ impl ClipAssistantAppDelegate {
             .borrow()
             .as_ref()
             .is_some_and(|s| !s.popover.isShown());
+        info!("popover {} via {via}", if opening { "open" } else { "close" });
         if opening {
             self.capture_target_app();
             self.update_prediction();
