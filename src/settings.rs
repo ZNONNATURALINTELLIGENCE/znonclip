@@ -87,7 +87,7 @@ pub struct Settings {
     pub history_limit: usize,
     /// Whether to auto-paste (⌘V) after selecting an item.
     pub auto_paste: bool,
-    /// Whether to launch ClipPin at login (SMAppService).
+    /// Whether to launch Clip Assistant at login (SMAppService).
     pub launch_at_login: bool,
     /// Global hotkey preset.
     pub hotkey: HotkeyPreset,
@@ -98,13 +98,21 @@ impl Default for Settings {
         Self {
             poll_interval_ms: 500,
             retention_days: 30,
-            history_limit: 1000,
-            auto_paste: false,
+            history_limit: DEFAULT_HISTORY_ITEMS,
+            // Enter in the popover should paste, like ⌘V; without Accessibility
+            // permission this degrades to copy-only with a status notice.
+            auto_paste: true,
             launch_at_login: false,
             hotkey: HotkeyPreset::default(),
         }
     }
 }
+
+/// Default number of unpinned (recent) items kept.
+pub const DEFAULT_HISTORY_ITEMS: usize = 20;
+
+/// Hard cap on pinned items. Pinning beyond this is refused with a notice.
+pub const MAX_PINNED: usize = 20;
 
 /// Poll interval options shown in the UI (ms).
 pub const POLL_INTERVAL_OPTIONS: [u64; 4] = [250, 500, 1000, 2000];
@@ -113,7 +121,7 @@ pub const POLL_INTERVAL_OPTIONS: [u64; 4] = [250, 500, 1000, 2000];
 pub const RETENTION_DAY_OPTIONS: [i64; 5] = [7, 30, 90, 365, 0];
 
 /// History max-count options.
-pub const HISTORY_LIMIT_OPTIONS: [usize; 5] = [100, 500, 1000, 5000, 10_000];
+pub const HISTORY_LIMIT_OPTIONS: [usize; 5] = [20, 50, 100, 500, 1000];
 
 impl Settings {
     /// Load settings from SQLite (missing keys keep defaults).
@@ -135,7 +143,7 @@ impl Settings {
         }
         if let Ok(Some(v)) = storage.get_setting(KEY_HISTORY_LIMIT) {
             if let Ok(n) = v.parse::<usize>() {
-                s.history_limit = n.max(10);
+                s.history_limit = n.max(5);
             }
         }
         if let Ok(Some(v)) = storage.get_setting(KEY_HOTKEY) {

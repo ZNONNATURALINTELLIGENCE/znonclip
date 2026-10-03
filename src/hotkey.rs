@@ -1,7 +1,7 @@
 //! Global hotkey registration (configurable presets, default **Cmd+Shift+V**).
 //!
 //! Uses `NSEvent` global + local monitors. Global monitors observe only;
-//! local monitors can swallow the keystroke when ClipPin is key.
+//! local monitors can swallow the keystroke when Clip Assistant is key.
 
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -49,6 +49,11 @@ impl HotkeyManager {
             let event_ref = unsafe { event.as_ref() };
             if is_active_hotkey(event_ref) {
                 dispatch_hotkey_to_delegate();
+                return std::ptr::null_mut();
+            }
+            // Popover keyboard navigation (arrows / Enter / Esc), only when no
+            // command-style modifier is held so ⌘A, ⌘C etc. keep working.
+            if is_nav_key(event_ref) && dispatch_nav_key_to_delegate(event_ref.keyCode()) {
                 return std::ptr::null_mut();
             }
             event.as_ptr()
@@ -121,6 +126,37 @@ fn is_active_hotkey(event: &NSEvent) -> bool {
     flags.bits() as u64 == want_mods
 }
 
+/// Key codes the popover handles itself.
+pub const KEY_RETURN: u16 = 36;
+pub const KEY_KEYPAD_ENTER: u16 = 76;
+pub const KEY_ESCAPE: u16 = 53;
+pub const KEY_DOWN: u16 = 125;
+pub const KEY_UP: u16 = 126;
+
+fn is_nav_key(event: &NSEvent) -> bool {
+    let code = event.keyCode();
+    if !matches!(code, KEY_RETURN | KEY_KEYPAD_ENTER | KEY_ESCAPE | KEY_DOWN | KEY_UP) {
+        return false;
+    }
+    let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
+    !flags.intersects(
+        NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option,
+    )
+}
+
+/// Ask the delegate to handle a navigation key. Returns true if it consumed it.
+fn dispatch_nav_key_to_delegate(code: u16) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(delegate) = app.delegate() else {
+        return false;
+    };
+    // SAFETY: ClipAssistantAppDelegate implements popoverNavKey: (NSInteger) -> BOOL.
+    unsafe { msg_send![&*delegate, popoverNavKey: code as isize] }
+}
+
 fn dispatch_hotkey_to_delegate() {
     let Some(mtm) = MainThreadMarker::new() else {
         warn!("hotkey fired off main thread — ignoring");
@@ -130,7 +166,7 @@ fn dispatch_hotkey_to_delegate() {
     let Some(delegate) = app.delegate() else {
         return;
     };
-    // SAFETY: ClipPinAppDelegate implements hotkeyTogglePopover:.
+    // SAFETY: ClipAssistantAppDelegate implements hotkeyTogglePopover:.
     let _: () = unsafe {
         msg_send![&*delegate, hotkeyTogglePopover: Option::<&AnyObject>::None]
     };

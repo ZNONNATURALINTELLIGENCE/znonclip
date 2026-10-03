@@ -1,11 +1,11 @@
-//! ClipPin — macOS menu-bar clipboard history manager.
+//! Clip Assistant — macOS menu-bar clipboard history manager.
 //!
 //! Entry point: initializes logging and starts the AppKit application.
 //!
 //! ```text
-//! clippin              # run in the foreground (terminal stays attached)
-//! clippin --detach     # spawn in the background and return immediately
-//! clippin -d           # short form of --detach
+//! clip-assistant              # run in the foreground (terminal stays attached)
+//! clip-assistant --detach     # spawn in the background and return immediately
+//! clip-assistant -d           # short form of --detach
 //! ```
 
 mod accessibility;
@@ -14,6 +14,7 @@ mod autopaste;
 mod clipboard;
 mod hotkey;
 mod launch;
+mod predict;
 mod privacy;
 mod settings;
 mod status_item;
@@ -47,9 +48,9 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     if env::var_os(launch::AUTOSTART_ENV).is_some() {
-        info!("ClipPin starting (launchd autostart — no Terminal)");
+        info!("Clip Assistant starting (launchd autostart — no Terminal)");
     } else {
-        info!("ClipPin starting");
+        info!("Clip Assistant starting");
     }
     app::run();
 }
@@ -62,11 +63,11 @@ fn print_help() {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "clippin".into());
+        .unwrap_or_else(|| "clip-assistant".into());
 
     println!(
         "\
-ClipPin — macOS menu-bar clipboard history
+Clip Assistant — macOS menu-bar clipboard history
 
 USAGE:
     {name} [OPTIONS]
@@ -80,8 +81,8 @@ EXAMPLES:
     {name} -d        Detached / independent process
     {name} --detach
 
-Detached logs: ~/Library/Logs/ClipPin/clippin.log
-Stop:          pkill -x clippin
+Detached logs: ~/Library/Logs/ClipAssistant/clip-assistant.log
+Stop:          pkill -x clip-assistant
 "
     );
 }
@@ -91,7 +92,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
     let exe = match env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("clippin: cannot resolve executable path: {e}");
+            eprintln!("clip-assistant: cannot resolve executable path: {e}");
             std::process::exit(1);
         }
     };
@@ -114,7 +115,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
             }
         },
         Err(e) => {
-            eprintln!("clippin: warning: could not open log file ({e}); discarding output");
+            eprintln!("clip-assistant: warning: could not open log file ({e}); discarding output");
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
         }
@@ -142,14 +143,14 @@ fn detach_and_exit(child_args: &[String]) -> ! {
                 .map(|p| format!("\n  logs: {}", p.display()))
                 .unwrap_or_default();
             eprintln!(
-                "ClipPin started in background (pid {}){}",
+                "Clip Assistant started in background (pid {}){}",
                 child.id(),
                 log_hint
             );
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("clippin: failed to start detached process: {e}");
+            eprintln!("clip-assistant: failed to start detached process: {e}");
             std::process::exit(1);
         }
     }
@@ -161,8 +162,8 @@ fn detach_log_path() -> Option<PathBuf> {
         PathBuf::from(home)
             .join("Library")
             .join("Logs")
-            .join("ClipPin")
-            .join("clippin.log"),
+            .join("ClipAssistant")
+            .join("clip-assistant.log"),
     )
 }
 

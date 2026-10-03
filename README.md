@@ -1,6 +1,18 @@
-# ClipPin
+# Clip Assistant
 
-Lightweight macOS menu-bar clipboard history manager. Local-first, native AppKit (Rust), no Electron.
+A small, native macOS menu-bar clipboard manager. It keeps your **last 20 copies**
+and up to **20 pins**, opens with a hotkey or a click on the menu-bar icon (left,
+right or two-finger), and **pre-highlights the item you most likely want to
+paste**, so the usual case is a single key: Enter.
+
+It is written in Rust with native AppKit: no Electron, no webview. Everything
+stays on your Mac.
+
+> Clip Assistant is a fork of **[ClipPin](https://github.com/kushwahramkumar2003/clippin)**
+> by the ClipPin contributors (MIT). The menu-bar shell, privacy filter, SQLite
+> store, hotkey and auto-paste come from ClipPin. Clip Assistant adds the
+> predictive highlight, keyboard paste, right-click and two-finger-click opening,
+> source and target app tracking, and the 20/20 working set.
 
 **Requires:** macOS 13+, [Rust](https://rustup.rs/), Xcode Command Line Tools.
 
@@ -8,119 +20,93 @@ Lightweight macOS menu-bar clipboard history manager. Local-first, native AppKit
 
 ## Install
 
-### One-liner (recommended)
-
-Installs ClipPin as a standalone binary in `~/.cargo/bin` (independent of this repo):
-
 ```bash
-cargo install --git https://github.com/kushwahramkumar2003/clippin.git --locked
-```
-
-Make sure Cargo’s bin directory is on your `PATH` (usually already is after installing Rust):
-
-```bash
-# If `clippin` is not found after install:
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-### From a local clone
-
-```bash
-git clone https://github.com/kushwahramkumar2003/clippin.git
-cd clippin
+git clone https://github.com/ZNONNATURALINTELLIGENCE/clip-assistant.git
+cd clip-assistant
 cargo install --path . --locked
 ```
 
 ### Run
 
-**Detached (recommended)** — starts independently; you can close the terminal:
-
 ```bash
-clippin --detach
-# or
-clippin -d
+clip-assistant --detach     # background; the terminal can close
+clip-assistant              # foreground, with logs (useful for debugging)
 ```
 
-**Foreground** — keeps the terminal attached (useful for debugging):
-
-```bash
-clippin
-```
-
-ClipPin lives in the **menu bar** (no Dock icon).
-
-**Launch at login** (Settings checkbox):
-
-- **CLI / `cargo install` binary** → user LaunchAgent (`~/Library/LaunchAgents/com.clippin.app.plist`). Started by `launchd` at login — **no Terminal window**.
-- **Packaged `.app`** → macOS Login Items via `SMAppService`.
-
-After updating ClipPin, toggle **Launch at login** off → on once so the agent path is rewritten to the new binary.
+The app lives in the **menu bar** and has no Dock icon.
 
 | | |
 |--|--|
-| **Manual background** | `clippin --detach` / `clippin -d` |
-| **Stop** | Quit from the popover, or `pkill -x clippin` |
-| **Logs** | `~/Library/Logs/ClipPin/clippin.log` |
-| **Help** | `clippin --help` |
-
-### Update
-
-```bash
-cargo install --git https://github.com/kushwahramkumar2003/clippin.git --locked --force
-```
+| **Stop** | `pkill -x clip-assistant` |
+| **Logs** | `~/Library/Logs/ClipAssistant/clip-assistant.log` (detached mode) |
+| **Help** | `clip-assistant --help` |
 
 ### Uninstall
 
 ```bash
-cargo uninstall clippin
-# Optional: remove history & settings
-rm -rf ~/Library/Application\ Support/com.clippin.app
-# Optional: remove login agent if you used Launch at login (dev binary)
-rm -f ~/Library/LaunchAgents/com.clippin.app.plist
-launchctl bootout "gui/$(id -u)/com.clippin.app" 2>/dev/null || true
+cargo uninstall clip-assistant
+rm -rf ~/Library/Application\ Support/com.clipassistant.app      # history + settings
+rm -f ~/Library/LaunchAgents/com.clipassistant.app.plist          # if you used launch at login
 ```
 
 ---
 
-## Features
+## Use
 
-- Menu bar history (text, RTF, HTML, images, files, URLs)
-- Search, pin, multi-select delete, clear unpinned
-- Global hotkey (default **⌘⇧V**)
-- Optional auto-paste (needs Accessibility permission)
-- Privacy-aware (skips password-manager concealed/transient pasteboard types)
-- Launch at login
-- Local SQLite storage under `~/Library/Application Support/com.clippin.app/`
+| Action | How |
+|---|---|
+| Open | **⌘⇧V**, or click the menu-bar icon (left, right or two-finger) |
+| Paste the suggested item | **Enter** |
+| Pick another | **↑ / ↓**, then Enter, or click a row |
+| Close | **Esc** (focus returns to your app) |
+| Search | Type; the suggestion is switched off while you search |
+| Pin / unpin / delete | Right-click a row |
+| Settings | Gear icon |
+
+### What "suggested" means
+
+When the menu opens, a local ranker scores your recent copies and pins and
+highlights the best guess with ✨. Hover over the row to see why, for example
+*"often pasted into this app"* or *"most recent copy"*. The suggestion is only a
+highlight. The list order never changes, and nothing is pasted until you press
+Enter or click.
+
+The signals it uses: how recent each copy is, whether it is pinned, which app
+you are pasting into, what you have pasted into that app before, the content
+type, and whether the item is already on the clipboard. It records **which**
+item you pasted **where**, never the content. Details and the plan for adding a
+small local model are in [docs/architecture.md](docs/architecture.md).
 
 ---
 
-## Usage
+## Privacy
 
-| Action               | How                                                        |
-| -------------------- | ---------------------------------------------------------- |
-| Open                 | Click menu bar icon, or **⌘⇧V**                            |
-| Search               | Type in the search field                                   |
-| Copy item            | Click a row                                                |
-| Pin / unpin / delete | Right-click a row                                          |
-| Settings             | Gear icon in the popover                                   |
-| Auto-paste           | Enable in the toolbar; grant Accessibility when macOS asks |
-
----
+- Copies from password managers, and anything else that marks the pasteboard
+  `org.nspasteboard.ConcealedType` or `TransientType`, are skipped **before** the
+  data is read. They never reach memory, disk or the ranker.
+- History, pins and paste statistics stay in a local SQLite file. There is no
+  network code.
 
 ## Permissions
 
-| Permission                   | Why                                            |
-| ---------------------------- | ---------------------------------------------- |
-| **Accessibility**            | Auto-paste simulates ⌘V into the frontmost app |
-| **Login item / LaunchAgent** | Launch at login                                |
+| Permission | Why |
+|---|---|
+| **Accessibility** | To paste for you (synthesizes ⌘V). Without it, Enter copies and you press ⌘V yourself. |
+| **Login item / LaunchAgent** | Optional launch at login |
 
-Grant Accessibility under:
+Grant Accessibility under **System Settings → Privacy & Security → Accessibility**.
 
-**System Settings → Privacy & Security → Accessibility**
+## Memory
 
----
+Idle memory is measured, not estimated. To check it on your own Mac:
+
+```bash
+scripts/measure-rss.sh
+```
+
+Measured on Apple Silicon: **TBD (filled in after the first verified run)**.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Original work © the ClipPin contributors;
+modifications © the Clip Assistant contributors.

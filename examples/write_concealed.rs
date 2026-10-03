@@ -22,7 +22,7 @@ fn main() {
     let secret = args
         .first()
         .cloned()
-        .unwrap_or_else(|| "clippin-test-secret".to_string());
+        .unwrap_or_else(|| "clip-assistant-test-secret".to_string());
 
     let pb = NSPasteboard::generalPasteboard();
     // One clear + declare both types, then set marker and string immediately.

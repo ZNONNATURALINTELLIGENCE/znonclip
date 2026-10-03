@@ -1,11 +1,12 @@
 //! SQLite persistence for clipboard history and settings.
 //!
 //! Database lives at:
-//! `~/Library/Application Support/com.clippin.app/clippin.db`
+//! `~/Library/Application Support/com.clipassistant.app/clip-assistant.db`
 //!
 //! Uses WAL mode for efficient concurrent-style access (UI reads / poller writes
 //! on the main thread). Schema matches `ARCHITECTURE.md`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -26,11 +27,11 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 #[allow(dead_code)]
 pub const DEFAULT_MAX_ITEMS: usize = 10_000;
 
-/// Bundle-style application support folder name: `com.clippin.app`.
+/// Bundle-style application support folder name: `com.clipassistant.app`.
 const APP_SUPPORT_QUALIFIER: &str = "com";
-const APP_SUPPORT_ORG: &str = "clippin";
+const APP_SUPPORT_ORG: &str = "clipassistant";
 const APP_SUPPORT_APP: &str = "app";
-const DB_FILE_NAME: &str = "clippin.db";
+const DB_FILE_NAME: &str = "clip-assistant.db";
 
 /// Errors from the storage layer.
 #[derive(Debug, Error)]
@@ -115,6 +116,19 @@ impl Storage {
                 ON clipboard_items (is_pinned);
             CREATE INDEX IF NOT EXISTS idx_clipboard_items_hash
                 ON clipboard_items (hash);
+
+            -- Predictive-paste signal: which item was pasted into which app.
+            -- Metadata only; never content. Rows vanish with their item.
+            CREATE TABLE IF NOT EXISTS paste_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id      INTEGER NOT NULL
+                             REFERENCES clipboard_items(id) ON DELETE CASCADE,
+                target_app   TEXT,
+                content_type TEXT NOT NULL,
+                pasted_at    TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_paste_events_target_app
+                ON paste_events (target_app);
             "#,
         )?;
         Ok(())
@@ -431,6 +445,68 @@ impl Storage {
         Ok(item)
     }
 
+    /// Number of pinned rows (for the pin cap).
+    pub fn pinned_count(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM clipboard_items WHERE is_pinned = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    // ── Paste events (predictive-paste signal) ──────────────────────────────
+
+    /// Record that `item_id` was pasted into `target_app` (bundle id).
+    /// Keeps only the newest [`MAX_PASTE_EVENTS`] rows.
+    pub fn record_paste(
+        &self,
+        item_id: u64,
+        target_app: Option<&str>,
+        content_type: ContentType,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO paste_events (item_id, target_app, content_type, pasted_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![item_id, target_app, content_type.as_str(), utc_now_iso8601()],
+        )?;
+        self.conn.execute(
+            r#"
+            DELETE FROM paste_events WHERE id NOT IN (
+                SELECT id FROM paste_events ORDER BY id DESC LIMIT ?1
+            )
+            "#,
+            params![MAX_PASTE_EVENTS as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Paste history for one target app: per-item and per-content-type counts.
+    pub fn paste_stats(&self, target_app: Option<&str>) -> Result<PasteStats> {
+        let mut stats = PasteStats::default();
+        let Some(app) = target_app else {
+            return Ok(stats);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT item_id, content_type FROM paste_events WHERE target_app = ?1",
+        )?;
+        let rows = stmt.query_map(params![app], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (item_id, ct) = row?;
+            *stats.per_item.entry(item_id).or_insert(0) += 1;
+            *stats
+                .per_type
+                .entry(ContentType::from_str_lossy(&ct))
+                .or_insert(0) += 1;
+            stats.total += 1;
+        }
+        Ok(stats)
+    }
+
     // ── Settings ────────────────────────────────────────────────────────────
 
     #[allow(dead_code)] // Phase 7 preferences
@@ -459,8 +535,22 @@ impl Storage {
     }
 }
 
+/// Newest paste events kept for the ranker (older rows are dropped).
+pub const MAX_PASTE_EVENTS: usize = 2_000;
+
+/// Aggregated paste history for one target app.
+#[derive(Debug, Default, Clone)]
+pub struct PasteStats {
+    /// item id → times pasted into this app.
+    pub per_item: HashMap<u64, u32>,
+    /// content type → times pasted into this app.
+    pub per_type: HashMap<ContentType, u32>,
+    /// Total paste events for this app.
+    pub total: u32,
+}
+
 fn app_support_dir() -> Result<PathBuf> {
-    // ProjectDirs → ~/Library/Application Support/com.clippin.app on macOS
+    // ProjectDirs → ~/Library/Application Support/com.clipassistant.app on macOS
     let dirs = ProjectDirs::from(APP_SUPPORT_QUALIFIER, APP_SUPPORT_ORG, APP_SUPPORT_APP)
         .ok_or(StorageError::NoProjectDirs)?;
     Ok(dirs.data_dir().to_path_buf())
@@ -544,7 +634,7 @@ fn format_unix_ms_iso8601(ms: u64) -> String {
 fn unix_secs_to_utc_parts(mut secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     // Algorithm based on civil_from_days (Howard Hinnant).
     if secs < 0 {
-        // ClipPin targets modern macOS; negative timestamps are unexpected.
+        // Clip Assistant targets modern macOS; negative timestamps are unexpected.
         warn!("negative unix timestamp; clamping to 0");
         secs = 0;
     }
@@ -593,7 +683,7 @@ mod tests {
 
     #[test]
     fn insert_query_dedup_and_prune() {
-        let dir = std::env::temp_dir().join(format!("clippin-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("clip-assistant-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("test.db");
@@ -623,6 +713,19 @@ mod tests {
         assert!(storage.get_item(id2).unwrap().is_none());
         // Pinned row still present
         assert!(storage.get_item(id1).unwrap().is_some());
+        assert_eq!(storage.pinned_count().unwrap(), 1);
+
+        // Paste events aggregate per app and cascade-delete with the item
+        storage.record_paste(id1, Some("com.example.editor"), ContentType::Text).unwrap();
+        storage.record_paste(id1, Some("com.example.editor"), ContentType::Text).unwrap();
+        storage.record_paste(id1, Some("com.example.term"), ContentType::Text).unwrap();
+        let st = storage.paste_stats(Some("com.example.editor")).unwrap();
+        assert_eq!(st.total, 2);
+        assert_eq!(st.per_item.get(&id1), Some(&2));
+        assert_eq!(st.per_type.get(&ContentType::Text), Some(&2));
+        assert_eq!(storage.paste_stats(None).unwrap().total, 0);
+        assert!(storage.delete_item(id1).unwrap());
+        assert_eq!(storage.paste_stats(Some("com.example.editor")).unwrap().total, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

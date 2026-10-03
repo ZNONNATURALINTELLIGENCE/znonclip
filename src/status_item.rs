@@ -27,7 +27,7 @@ use objc2_foundation::{ns_string, NSPoint, NSRect, NSRectEdge, NSSize, NSString}
 use crate::clipboard::{ClipboardItem, History};
 use crate::settings::{
     history_limit_label, poll_label, retention_label, HotkeyPreset, Settings,
-    HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
+    DEFAULT_HISTORY_ITEMS, HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
 };
 
 /// Fixed popover content size (points) — compact utility panel, not a window.
@@ -77,6 +77,12 @@ pub struct StatusItemController {
     /// Multi-select mode for bulk delete.
     select_mode: Cell<bool>,
     selected_ids: RefCell<HashSet<u64>>,
+    /// Keyboard cursor (Enter pastes it). Seeded from the ranker's prediction.
+    highlight_id: Cell<Option<u64>>,
+    /// Ranker's pick and its one-line reason (shown as a marker + tooltip).
+    suggestion: RefCell<Option<(u64, String)>>,
+    /// Row ids in on-screen order, top to bottom (for arrow-key navigation).
+    display_order: RefCell<Vec<u64>>,
     /// Global mouse-down monitor so Transient popover closes when clicking outside.
     _dismiss_monitor: Option<Retained<AnyObject>>,
     _dismiss_block: Option<RcBlock<dyn Fn(NonNull<NSEvent>)>>,
@@ -90,14 +96,16 @@ impl StatusItemController {
         if let Some(button) = status_item.button(mtm) {
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
                 ns_string!("clipboard"),
-                Some(ns_string!("ClipPin clipboard history")),
+                Some(ns_string!("Clip Assistant clipboard history")),
             ) {
                 image.setTemplate(true);
                 button.setImage(Some(&image));
             } else {
                 button.setTitle(ns_string!("📋"));
             }
-            button.setToolTip(Some(ns_string!("ClipPin — Clipboard History")));
+            button.setToolTip(Some(ns_string!("Clip Assistant — Clipboard History")));
+            // Open on left click AND right / two-finger click (default is left only).
+            button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
         }
 
         let built = build_popover(mtm);
@@ -177,6 +185,9 @@ impl StatusItemController {
             settings_visible: Cell::new(false),
             select_mode: Cell::new(false),
             selected_ids: RefCell::new(HashSet::new()),
+            highlight_id: Cell::new(None),
+            suggestion: RefCell::new(None),
+            display_order: RefCell::new(Vec::new()),
             _dismiss_monitor: dismiss_monitor,
             _dismiss_block: Some(dismiss_block),
         }
@@ -230,6 +241,38 @@ impl StatusItemController {
                 .setAction(Some(sel!(cancelSelectMode:)));
         }
         self.refresh_toolbar_mode();
+    }
+
+    /// Set the ranker's suggestion and move the keyboard cursor onto it.
+    pub fn set_suggestion(&self, suggestion: Option<(u64, String)>) {
+        self.highlight_id.set(suggestion.as_ref().map(|s| s.0));
+        *self.suggestion.borrow_mut() = suggestion;
+    }
+
+    /// Item under the keyboard cursor.
+    pub fn highlighted_id(&self) -> Option<u64> {
+        self.highlight_id.get()
+    }
+
+    /// Move the keyboard cursor by `delta` rows (clamped). Returns the new id.
+    pub fn move_highlight(&self, delta: isize) -> Option<u64> {
+        let order = self.display_order.borrow();
+        if order.is_empty() {
+            return None;
+        }
+        let cur = self
+            .highlight_id
+            .get()
+            .and_then(|id| order.iter().position(|&x| x == id))
+            .unwrap_or(0) as isize;
+        let next = (cur + delta).clamp(0, order.len() as isize - 1) as usize;
+        let id = order[next];
+        self.highlight_id.set(Some(id));
+        Some(id)
+    }
+
+    pub fn settings_visible(&self) -> bool {
+        self.settings_visible.get()
     }
 
     pub fn is_select_mode(&self) -> bool {
@@ -353,7 +396,7 @@ impl StatusItemController {
 
     pub fn selected_history_limit(&self) -> usize {
         let i = self.history_limit_popup.indexOfSelectedItem().max(0) as usize;
-        HISTORY_LIMIT_OPTIONS.get(i).copied().unwrap_or(1000)
+        HISTORY_LIMIT_OPTIONS.get(i).copied().unwrap_or(DEFAULT_HISTORY_ITEMS)
     }
 
     pub fn selected_hotkey(&self) -> HotkeyPreset {
@@ -465,6 +508,8 @@ impl StatusItemController {
         let clip_h = self.scroll_view.contentView().bounds().size.height;
 
         if items.is_empty() {
+            self.display_order.borrow_mut().clear();
+            self.highlight_id.set(None);
             if query_empty {
                 self.empty_label.setStringValue(ns_string!(
                     "No history yet\nCopy something to get started"
@@ -486,6 +531,16 @@ impl StatusItemController {
 
         let pinned: Vec<&ClipboardItem> = items.iter().filter(|i| i.is_pinned).collect();
         let recent: Vec<&ClipboardItem> = items.iter().filter(|i| !i.is_pinned).collect();
+
+        // On-screen order drives arrow keys; a stale cursor falls back to the top row.
+        let order: Vec<u64> = pinned.iter().chain(recent.iter()).map(|i| i.id).collect();
+        if !self.highlight_id.get().is_some_and(|id| order.contains(&id)) {
+            self.highlight_id.set(order.first().copied());
+        }
+        *self.display_order.borrow_mut() = order;
+        let cursor = if self.select_mode.get() { None } else { self.highlight_id.get() };
+        let suggestion = self.suggestion.borrow().clone();
+        let mut cursor_frame: Option<NSRect> = None;
 
         // Compute total document height (top → bottom sections).
         let mut content_h = 4.0_f64;
@@ -520,12 +575,14 @@ impl StatusItemController {
 
             for item in &pinned {
                 y -= ROW_H;
-                let selected = self.is_selected(item.id);
-                let row = make_history_row(mtm, item, action_target, select, selected, content_w);
-                row.setFrame(NSRect::new(
-                    NSPoint::new(PAD, y),
-                    NSSize::new(content_w, ROW_H),
-                ));
+                let selected = self.is_selected(item.id) || cursor == Some(item.id);
+                let hint = suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str());
+                let row = make_history_row(mtm, item, action_target, select, selected, hint, content_w);
+                let frame = NSRect::new(NSPoint::new(PAD, y), NSSize::new(content_w, ROW_H));
+                row.setFrame(frame);
+                if cursor == Some(item.id) {
+                    cursor_frame = Some(frame);
+                }
                 self.list_document.addSubview(&row);
                 y -= ROW_GAP;
             }
@@ -546,12 +603,14 @@ impl StatusItemController {
 
         for item in &recent {
             y -= ROW_H;
-            let selected = self.is_selected(item.id);
-            let row = make_history_row(mtm, item, action_target, select, selected, content_w);
-            row.setFrame(NSRect::new(
-                NSPoint::new(PAD, y),
-                NSSize::new(content_w, ROW_H),
-            ));
+            let selected = self.is_selected(item.id) || cursor == Some(item.id);
+            let hint = suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str());
+            let row = make_history_row(mtm, item, action_target, select, selected, hint, content_w);
+            let frame = NSRect::new(NSPoint::new(PAD, y), NSSize::new(content_w, ROW_H));
+            row.setFrame(frame);
+            if cursor == Some(item.id) {
+                cursor_frame = Some(frame);
+            }
             self.list_document.addSubview(&row);
             y -= ROW_GAP;
         }
@@ -561,6 +620,10 @@ impl StatusItemController {
         let max_y = (doc_h - clip.bounds().size.height).max(0.0);
         clip.scrollToPoint(NSPoint::new(0.0, max_y));
         self.scroll_view.reflectScrolledClipView(&clip);
+        // Then make sure the keyboard cursor is on screen.
+        if let Some(frame) = cursor_frame {
+            let _ = self.list_document.scrollRectToVisible(frame);
+        }
     }
 
     pub fn set_status_notice(&self, message: Option<&str>) {
@@ -612,10 +675,10 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     let header_y = POPOVER_HEIGHT - HEADER_H - 6.0;
 
     // Wordmark — medium weight, primary label (not heavy bold).
-    let header = NSTextField::labelWithString(ns_string!("ClipPin"), mtm);
+    let header = NSTextField::labelWithString(ns_string!("Clip Assistant"), mtm);
     header.setFrame(NSRect::new(
         NSPoint::new(PAD, header_y),
-        NSSize::new(100.0, HEADER_H - 6.0),
+        NSSize::new(150.0, HEADER_H - 6.0),
     ));
     header.setFont(Some(unsafe { NSFont::systemFontOfSize_weight(13.0, NSFontWeightSemibold) }.as_ref()));
     header.setTextColor(Some(&NSColor::labelColor()));
@@ -960,7 +1023,7 @@ fn build_settings_panel(mtm: MainThreadMarker) -> Retained<NSView> {
     ));
     launch_cb.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     launch_cb.setToolTip(Some(ns_string!(
-        "Start ClipPin when you log in. Uses SMAppService for .app installs, or a LaunchAgent for cargo/dev builds."
+        "Start Clip Assistant when you log in. Uses SMAppService for .app installs, or a LaunchAgent for cargo/dev builds."
     )));
     launch_cb.setTag(5);
     panel.addSubview(&launch_cb);
@@ -1088,6 +1151,7 @@ fn make_history_row(
     action_target: &AnyObject,
     select_mode: bool,
     selected: bool,
+    suggestion: Option<&str>,
     width: f64,
 ) -> Retained<NSView> {
     let row = NSView::new(mtm);
@@ -1152,6 +1216,8 @@ fn make_history_row(
         } else {
             "circle"
         }
+    } else if suggestion.is_some() {
+        "sparkles"
     } else if item.is_pinned {
         "pin.fill"
     } else {
@@ -1178,10 +1244,15 @@ fn make_history_row(
         } else {
             format!("Click to select · {tip}")
         }
-    } else if item.is_pinned {
-        format!("Pinned · {tip}")
     } else {
-        tip
+        let mut prefix = String::new();
+        if let Some(reason) = suggestion {
+            prefix.push_str(&format!("Suggested ({reason}) · Enter to paste · "));
+        }
+        if item.is_pinned {
+            prefix.push_str("Pinned · ");
+        }
+        format!("{prefix}{tip}")
     };
     button.setToolTip(Some(&NSString::from_str(&tip)));
 
@@ -1303,8 +1374,8 @@ fn format_relative_time(created_at: &str) -> String {
     format!("{}y", delta / (86400 * 365))
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SS[.mmm]Z` (ClipPin storage format) to unix seconds.
-fn parse_iso8601_to_unix_secs(s: &str) -> Option<i64> {
+/// Parse `YYYY-MM-DDTHH:MM:SS[.mmm]Z` (Clip Assistant storage format) to unix seconds.
+pub(crate) fn parse_iso8601_to_unix_secs(s: &str) -> Option<i64> {
     let s = s.trim().trim_end_matches('Z');
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-');

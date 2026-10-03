@@ -7,11 +7,12 @@ use std::rc::Rc;
 
 use log::{error, info, warn};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSSearchField,
-    NSStatusItem,
+    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSEventType, NSRunningApplication, NSSearchField, NSStatusItem,
+    NSWorkspace,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSTimer};
 
@@ -20,17 +21,18 @@ use crate::autopaste;
 use crate::clipboard::{
     copy_item_to_pasteboard, ClipboardPoller, History, PollResult, DEFAULT_HISTORY_LIMIT,
 };
-use crate::hotkey::HotkeyManager;
+use crate::hotkey::{self, HotkeyManager};
 use crate::launch;
+use crate::predict::{self, HeuristicRanker, PasteContext, Ranker};
 use crate::privacy;
-use crate::settings::Settings;
+use crate::settings::{Settings, MAX_PINNED};
 use crate::status_item::{sender_item_id, StatusItemController};
 use crate::storage::{Storage, DEFAULT_CACHE_LIMIT};
 
 /// Delay before posting ⌘V so the previous app can regain focus after popover close.
-const AUTO_PASTE_DELAY_SECS: f64 = 0.12;
+const AUTO_PASTE_DELAY_SECS: f64 = 0.15;
 
-/// Instance state for the Objective-C `ClipPinAppDelegate` class.
+/// Instance state for the Objective-C `ClipAssistantAppDelegate` class.
 pub struct AppDelegateIvars {
     status: RefCell<Option<StatusItemController>>,
     history: Rc<RefCell<History>>,
@@ -43,6 +45,12 @@ pub struct AppDelegateIvars {
     hotkey: RefCell<Option<HotkeyManager>>,
     /// One-shot timer for delayed auto-paste.
     paste_timer: RefCell<Option<Retained<NSTimer>>>,
+    /// App that was frontmost when the popover opened: the paste destination.
+    target_app: RefCell<Option<Retained<NSRunningApplication>>>,
+    /// Hash of what we believe is on the system pasteboard right now.
+    clipboard_hash: RefCell<Option<String>>,
+    /// Advisory ranker for the pre-highlighted row.
+    ranker: HeuristicRanker,
     _status_item_keepalive: Cell<Option<Retained<NSStatusItem>>>,
 }
 
@@ -57,6 +65,9 @@ impl Default for AppDelegateIvars {
             timer: RefCell::new(None),
             hotkey: RefCell::new(None),
             paste_timer: RefCell::new(None),
+            target_app: RefCell::new(None),
+            clipboard_hash: RefCell::new(None),
+            ranker: HeuristicRanker::default(),
             _status_item_keepalive: Cell::new(None),
         }
     }
@@ -65,18 +76,18 @@ impl Default for AppDelegateIvars {
 define_class!(
     // SAFETY:
     // - NSObject has no subclassing requirements beyond normal NSObject rules.
-    // - ClipPinAppDelegate does not implement Drop (hotkey cleaned via Option drop if we don't forget).
+    // - ClipAssistantAppDelegate does not implement Drop (hotkey cleaned via Option drop if we don't forget).
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[name = "ClipPinAppDelegate"]
+    #[name = "ClipAssistantAppDelegate"]
     #[ivars = AppDelegateIvars]
-    pub struct ClipPinAppDelegate;
+    pub struct ClipAssistantAppDelegate;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
-    unsafe impl NSObjectProtocol for ClipPinAppDelegate {}
+    unsafe impl NSObjectProtocol for ClipAssistantAppDelegate {}
 
     // SAFETY: NSApplicationDelegate has no additional requirements.
-    unsafe impl NSApplicationDelegate for ClipPinAppDelegate {
+    unsafe impl NSApplicationDelegate for ClipAssistantAppDelegate {
         // SAFETY: Signature matches applicationDidFinishLaunching:.
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
@@ -145,7 +156,7 @@ define_class!(
 
             let s = self.ivars().settings.borrow().clone();
             info!(
-                "ClipPin ready — hotkey {}, poll {}ms, auto_paste={}",
+                "Clip Assistant ready — hotkey {}, poll {}ms, auto_paste={}",
                 s.hotkey.display(),
                 s.poll_interval_ms,
                 s.auto_paste
@@ -153,18 +164,67 @@ define_class!(
         }
     }
 
-    impl ClipPinAppDelegate {
+    impl ClipAssistantAppDelegate {
         // SAFETY: IBAction-style (sender: id).
         #[unsafe(method(togglePopover:))]
         fn toggle_popover(&self, _sender: Option<&AnyObject>) {
+            let app = NSApplication::sharedApplication(self.mtm());
+            let via = match app.currentEvent().map(|e| e.r#type()) {
+                Some(NSEventType::RightMouseUp) => "status item right/two-finger click",
+                Some(NSEventType::LeftMouseUp) => "status item left click",
+                _ => "status item",
+            };
+            info!("popover toggle via {via}");
             self.toggle_popover_impl();
+        }
+
+        /// Arrow / Enter / Esc while the popover is open. Returns true if consumed.
+        // SAFETY: called from the local key monitor with an NSInteger key code.
+        #[unsafe(method(popoverNavKey:))]
+        fn popover_nav_key(&self, code: isize) -> Bool {
+            let mtm = self.mtm();
+            let target: *const AnyObject = (self as *const Self).cast();
+            let status_ref = self.ivars().status.borrow();
+            let Some(status) = status_ref.as_ref() else {
+                return Bool::NO;
+            };
+            if !status.popover.isShown() || status.is_select_mode() || status.settings_visible() {
+                return Bool::NO;
+            }
+            match code as u16 {
+                hotkey::KEY_DOWN | hotkey::KEY_UP => {
+                    let delta = if code as u16 == hotkey::KEY_DOWN { 1 } else { -1 };
+                    if status.move_highlight(delta).is_some() {
+                        drop(status_ref);
+                        self.reload_list(mtm, unsafe { &*target });
+                    }
+                    Bool::YES
+                }
+                hotkey::KEY_RETURN | hotkey::KEY_KEYPAD_ENTER => {
+                    let Some(id) = status.highlighted_id() else {
+                        return Bool::NO;
+                    };
+                    drop(status_ref);
+                    info!("enter → paste item id={id}");
+                    self.paste_item(id);
+                    Bool::YES
+                }
+                hotkey::KEY_ESCAPE => {
+                    status.popover.close();
+                    if let Some(ref app) = *self.ivars().target_app.borrow() {
+                        let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
+                    }
+                    Bool::YES
+                }
+                _ => Bool::NO,
+            }
         }
 
         /// Invoked by global/local hotkey monitors.
         // SAFETY: same as togglePopover:.
         #[unsafe(method(hotkeyTogglePopover:))]
         fn hotkey_toggle_popover(&self, _sender: Option<&AnyObject>) {
-            info!("hotkey pressed");
+            info!("popover toggle via hotkey");
             self.toggle_popover_impl();
         }
 
@@ -351,6 +411,7 @@ define_class!(
                         // Don't clear accessibility tip unless it was a privacy message.
                         status.set_status_notice(None);
                     }
+                    *self.ivars().clipboard_hash.borrow_mut() = Some(item.hash.clone());
 
                     if let Some(ref storage) = *self.ivars().storage.borrow() {
                         match storage.touch_latest_if_hash(&item.hash) {
@@ -373,8 +434,18 @@ define_class!(
                                     let s = self.ivars().settings.borrow();
                                     (s.retention_days, s.history_limit)
                                 };
-                                if let Err(e) = storage.prune(days, limit) {
-                                    warn!("prune after insert failed: {e}");
+                                match storage.prune(days, limit) {
+                                    Ok(n) if n > 0 => {
+                                        // Rows were pruned: reload so the in-memory
+                                        // list matches the DB (new item included).
+                                        if let Ok(items) = storage.recent_items(DEFAULT_CACHE_LIMIT) {
+                                            self.ivars().history.borrow_mut().replace_all(items);
+                                        }
+                                        self.reload_list(mtm, unsafe { &*target });
+                                        return;
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => warn!("prune after insert failed: {e}"),
                                 }
                             }
                             Err(e) => error!("dedup check failed: {e}"),
@@ -399,6 +470,14 @@ define_class!(
                 .map(|f| f.stringValue().to_string())
                 .unwrap_or_default();
             let q = query.trim().to_string();
+
+            // A typed query is explicit intent: drop the suggestion while searching,
+            // re-run the ranker when the query is cleared.
+            if q.is_empty() {
+                self.update_prediction();
+            } else if let Some(ref status) = *self.ivars().status.borrow() {
+                status.set_suggestion(None);
+            }
 
             if let Some(ref status) = *self.ivars().status.borrow() {
                 if q.is_empty() {
@@ -444,7 +523,7 @@ define_class!(
                 let _ = accessibility::ensure_trusted_prompting();
                 if let Some(ref status) = *self.ivars().status.borrow() {
                     status.set_status_notice(Some(
-                        "Enable ClipPin in Accessibility, then restart for auto-paste",
+                        "Enable Clip Assistant in Accessibility, then restart for auto-paste",
                     ));
                 }
             } else if let Some(ref status) = *self.ivars().status.borrow() {
@@ -464,43 +543,7 @@ define_class!(
             let Some(id) = sender_item_id(sender) else {
                 return;
             };
-            let item = self
-                .ivars()
-                .history
-                .borrow()
-                .get(id)
-                .cloned()
-                .or_else(|| {
-                    self.ivars()
-                        .storage
-                        .borrow()
-                        .as_ref()
-                        .and_then(|s| s.get_item(id).ok().flatten())
-                });
-
-            let Some(item) = item else {
-                warn!("copy: item id={id} not found");
-                return;
-            };
-
-            // Avoid re-ingesting our own write as a new history entry (Phase 6.7).
-            self.ivars().poller.borrow_mut().ignore_next_change();
-            copy_item_to_pasteboard(&item);
-
-            let auto_paste = self.ivars().settings.borrow().auto_paste;
-
-            if let Some(ref status) = *self.ivars().status.borrow() {
-                if status.popover.isShown() {
-                    status.popover.close();
-                }
-            }
-
-            if auto_paste {
-                self.schedule_auto_paste();
-            } else if let Some(ref status) = *self.ivars().status.borrow() {
-                status.set_status_notice(Some("Copied to clipboard"));
-            }
-            info!("copied item id={id} to pasteboard (auto_paste={auto_paste})");
+            self.paste_item(id);
         }
 
         /// Delayed auto-paste timer callback.
@@ -556,6 +599,25 @@ define_class!(
                 })
                 .unwrap_or(false);
             let new_pin = !currently_pinned;
+
+            if new_pin {
+                let pinned = self
+                    .ivars()
+                    .storage
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.pinned_count().ok())
+                    .unwrap_or(0);
+                if pinned >= MAX_PINNED {
+                    if let Some(ref status) = *self.ivars().status.borrow() {
+                        status.set_status_notice(Some(&format!(
+                            "{MAX_PINNED} pins max: unpin one first"
+                        )));
+                    }
+                    info!("pin refused: {pinned} pinned (cap {MAX_PINNED})");
+                    return;
+                }
+            }
 
             if let Some(ref storage) = *self.ivars().storage.borrow() {
                 if let Err(e) = storage.set_pinned(id, new_pin) {
@@ -728,7 +790,7 @@ define_class!(
     }
 );
 
-impl ClipPinAppDelegate {
+impl ClipAssistantAppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AppDelegateIvars::default());
         // SAFETY: NSObject init signature is correct.
@@ -738,6 +800,16 @@ impl ClipPinAppDelegate {
     fn toggle_popover_impl(&self) {
         let mtm = self.mtm();
         let target: *const AnyObject = (self as *const Self).cast();
+        let opening = self
+            .ivars()
+            .status
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| !s.popover.isShown());
+        if opening {
+            self.capture_target_app();
+            self.update_prediction();
+        }
         if let Some(ref status) = *self.ivars().status.borrow() {
             status.show_history();
             status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe {
@@ -745,6 +817,123 @@ impl ClipPinAppDelegate {
             });
             status.toggle_popover(mtm);
         }
+    }
+
+    /// Remember the frontmost app (the paste destination) before we activate.
+    fn capture_target_app(&self) {
+        // While we are active (e.g. reopened from our own popover) the frontmost
+        // app is us: keep the previous target.
+        if NSApplication::sharedApplication(self.mtm()).isActive() {
+            return;
+        }
+        match NSWorkspace::sharedWorkspace().frontmostApplication() {
+            Some(app) => {
+                info!(
+                    "paste target: {}",
+                    app.bundleIdentifier()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "(unknown)".into())
+                );
+                *self.ivars().target_app.borrow_mut() = Some(app);
+            }
+            None => {}
+        }
+    }
+
+    fn target_bundle_id(&self) -> Option<String> {
+        self.ivars()
+            .target_app
+            .borrow()
+            .as_ref()
+            .and_then(|a| a.bundleIdentifier())
+            .map(|s| s.to_string())
+    }
+
+    /// Run the advisory ranker and pre-highlight its pick. Never fails the open:
+    /// with no storage or no items the highlight simply falls back to the top row.
+    fn update_prediction(&self) {
+        let target = self.target_bundle_id();
+        let stats = self
+            .ivars()
+            .storage
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.paste_stats(target.as_deref()).ok())
+            .unwrap_or_default();
+        let ctx = PasteContext::new(target, self.ivars().clipboard_hash.borrow().clone(), stats);
+        let items = self.ivars().history.borrow().filter("");
+        let ranker = &self.ivars().ranker;
+        let prediction = predict::predict(ranker, &items, &ctx);
+        if let Some(ref p) = prediction {
+            info!(
+                "prediction [{}]: item id={} score={:.3} ({}) target={}",
+                ranker.name(),
+                p.item_id,
+                p.score,
+                p.reason,
+                ctx.target_app.as_deref().unwrap_or("(unknown)")
+            );
+        }
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.set_suggestion(prediction.map(|p| (p.item_id, p.reason.to_string())));
+        }
+    }
+
+    /// Put `id` on the pasteboard, close the popover, return focus to the target
+    /// app and (if enabled) synthesize ⌘V. Shared by click and Enter.
+    fn paste_item(&self, id: u64) {
+        let item = self
+            .ivars()
+            .history
+            .borrow()
+            .get(id)
+            .cloned()
+            .or_else(|| {
+                self.ivars()
+                    .storage
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.get_item(id).ok().flatten())
+            });
+
+        let Some(item) = item else {
+            warn!("paste: item id={id} not found");
+            return;
+        };
+
+        // Avoid re-ingesting our own write as a new history entry.
+        self.ivars().poller.borrow_mut().ignore_next_change();
+        copy_item_to_pasteboard(&item);
+        *self.ivars().clipboard_hash.borrow_mut() = Some(item.hash.clone());
+
+        let target_bundle = self.target_bundle_id();
+        if let Some(ref storage) = *self.ivars().storage.borrow() {
+            if let Err(e) = storage.record_paste(id, target_bundle.as_deref(), item.content_type) {
+                warn!("record_paste failed: {e}");
+            }
+        }
+
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            if status.popover.isShown() {
+                status.popover.close();
+            }
+        }
+
+        // Hand focus back to where the user was, so ⌘V lands there.
+        if let Some(ref app) = *self.ivars().target_app.borrow() {
+            let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
+        }
+
+        let auto_paste = self.ivars().settings.borrow().auto_paste;
+        if auto_paste {
+            self.schedule_auto_paste();
+        } else if let Some(ref status) = *self.ivars().status.borrow() {
+            status.set_status_notice(Some("Copied to clipboard"));
+        }
+        info!(
+            "pasted item id={id} → {} (auto_paste={auto_paste})",
+            target_bundle.as_deref().unwrap_or("(unknown)")
+        );
     }
 
     fn persist_settings(&self) {
@@ -826,7 +1015,7 @@ pub fn run() {
     let mtm = MainThreadMarker::new().expect("UI must run on the main thread");
 
     let app = NSApplication::sharedApplication(mtm);
-    let delegate = ClipPinAppDelegate::new(mtm);
+    let delegate = ClipAssistantAppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     std::mem::forget(delegate);

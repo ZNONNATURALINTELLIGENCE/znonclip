@@ -1,12 +1,12 @@
 [package]
-name = "clippin"
-version = "0.1.0"
+name = "clip-assistant"
+version = "0.2.0"
 edition = "2021"
-description = "A lightweight macOS menu-bar clipboard history manager"
-authors = ["ClipPin Contributors"]
+description = "Lightweight macOS menu-bar clipboard manager with local, advisory predictive paste"
+authors = ["Clip Assistant contributors", "ClipPin Contributors (upstream)"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/kushwahramkumar2003/clippin"
+repository = "https://github.com/ZNONNATURALINTELLIGENCE/clip-assistant"
 keywords = ["clipboard", "macos", "menu-bar", "productivity"]
 categories = ["gui", "os::macos-apis"]
 
@@ -16,6 +16,7 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSRunningApplication",
+    "NSWorkspace",
     "NSStatusBar",
     "NSStatusItem",
     "NSStatusBarButton",
@@ -92,19 +93,20 @@ sha2 = "0.10"
 serde_json = "1"
 
 [package.metadata.bundle]
-name = "ClipPin"
-identifier = "com.clippin.app"
+name = "Clip Assistant"
+identifier = "com.clipassistant.app"
 # Agent app: no Dock icon, no main menu bar (merged via Info.plist)
 osx_info_plist_exts = ["Info.plist"]
 category = "public.app-category.utilities"
 short_description = "Lightweight macOS menu-bar clipboard history manager"
 long_description = """
-ClipPin is a local-first clipboard manager that lives in the macOS menu bar.
+Clip Assistant is a local-first clipboard manager that lives in the macOS menu bar.
 It monitors clipboard changes, stores searchable history, and supports pin,
-search, global hotkey, and optional auto-paste.
+search, global hotkey, auto-paste, and a local advisory ranker that
+pre-highlights the item you most likely want to paste.
 """
 osx_minimum_system_version = "13.0"
 
 [[bin]]
-name = "clippin"
+name = "clip-assistant"
 path = "src/main.rs"

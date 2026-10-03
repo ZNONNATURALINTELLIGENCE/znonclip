@@ -3,7 +3,7 @@
 //! Strategy (critical for production CLI installs):
 //!
 //! * **Proper `.app` bundle** → `SMAppService` (Login Items, no Terminal).
-//! * **Bare binary** (`cargo install`, `~/.cargo/bin/clippin`) → **only** a
+//! * **Bare binary** (`cargo install`, `~/.cargo/bin/clip-assistant`) → **only** a
 //!   user LaunchAgent under `~/Library/LaunchAgents/`.
 //!
 //! Never register a bare Unix executable with `SMAppService` / Login Items:
@@ -28,7 +28,7 @@ use objc2_foundation::{NSBundle, NSString};
 extern "C" {}
 
 /// LaunchAgent label / plist basename (must match reverse-DNS of the app).
-const AGENT_LABEL: &str = "com.clippin.app";
+const AGENT_LABEL: &str = "com.clipassistant.app";
 
 /// Env flag set by the LaunchAgent so the process knows it was auto-started.
 pub const AUTOSTART_ENV: &str = "CLIPPIN_AUTOSTART";
@@ -344,8 +344,8 @@ fn launch_agent_log_path() -> Option<PathBuf> {
     Some(
         home.join("Library")
             .join("Logs")
-            .join("ClipPin")
-            .join("clippin.log"),
+            .join("ClipAssistant")
+            .join("clip-assistant.log"),
     )
 }
 
@@ -503,7 +503,7 @@ fn enable_launch_agent() -> Result<(), String> {
         .args(["enable", &service])
         .output();
 
-    // Do not `kickstart` here — that would immediately spawn a second ClipPin
+    // Do not `kickstart` here — that would immediately spawn a second Clip Assistant
     // while the user is already in the UI. RunAtLoad applies at next login /
     // next bootstrap after a clean session load.
     info!("LaunchAgent ready for next login: {service}");

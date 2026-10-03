@@ -13,7 +13,7 @@ use objc2::AnyThread;
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
-    NSPasteboardTypeTIFF, NSPasteboardTypeURL,
+    NSPasteboardTypeTIFF, NSPasteboardTypeURL, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ pub enum PollResult {
 const THUMB_MAX: f64 = 256.0;
 
 /// Kind of clipboard payload (maps to storage `content_type`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentType {
     Text,
     Rtf,
@@ -612,12 +612,21 @@ fn extract_clipboard_item(pb: &NSPasteboard) -> Option<ClipboardItem> {
         content_image: image,
         content_file_paths: file_paths,
         content_url: url,
-        source_app_bundle_id: None,
+        // The app frontmost at capture time is (almost always) the one that copied.
+        source_app_bundle_id: frontmost_bundle_id(),
         is_pinned: false,
         created_at: String::new(), // filled by storage on insert
         hash,
         preview,
     })
+}
+
+/// Bundle id of the frontmost application, if any.
+pub fn frontmost_bundle_id() -> Option<String> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .and_then(|app| app.bundleIdentifier())
+        .map(|id| id.to_string())
 }
 
 fn extract_url(pb: &NSPasteboard) -> Option<String> {
