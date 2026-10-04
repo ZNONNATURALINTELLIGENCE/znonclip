@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Floater Mockup</title>
+<style>
+:root{
+  --bg:#d9dde4; --panel:rgba(246,247,250,.78); --line:rgba(0,0,0,.09); --text:#1d1d1f;
+  --muted:#6e6e73; --card:rgba(255,255,255,.85); --accent:#0a84ff; --ai:#a259ff; --danger:#ff3b30;
+  --shadow:0 18px 50px rgba(0,0,0,.22);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#1b1c20; --panel:rgba(40,41,46,.78); --line:rgba(255,255,255,.1); --text:#f2f2f7;
+    --muted:#98989f; --card:rgba(64,65,72,.85); --shadow:0 18px 50px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#1b1c20; --panel:rgba(40,41,46,.78); --line:rgba(255,255,255,.1); --text:#f2f2f7;
+  --muted:#98989f; --card:rgba(64,65,72,.85); --shadow:0 18px 50px rgba(0,0,0,.6);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:13px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;padding:16px}
+h1{font-size:17px;margin:0 0 4px} p.note{color:var(--muted);margin:0 0 14px;max-width:760px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+.controls button{border:1px solid var(--line);background:var(--card);color:var(--text);
+  border-radius:7px;padding:6px 10px;font:inherit;cursor:pointer}
+.controls button.on{border-color:var(--accent);color:var(--accent)}
+.stage{position:relative;min-height:440px;border-radius:12px;
+  background:linear-gradient(135deg,rgba(10,132,255,.12),rgba(162,89,255,.12)),
+  repeating-linear-gradient(0deg,transparent 0 22px,var(--line) 22px 23px);overflow:hidden;padding:18px}
+.fake-editor{position:absolute;inset:18px auto 18px 18px;width:46%;border-radius:10px;
+  background:var(--card);border:1px solid var(--line);padding:12px;color:var(--muted);font:12px/1.6 ui-monospace,Menlo,monospace}
+.fake-editor .caret{display:inline-block;width:1.5px;height:14px;background:var(--accent);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* the floater */
+.floater{position:absolute;right:18px;top:18px;width:min(460px,calc(100% - 36px));
+  background:var(--panel);backdrop-filter:blur(22px) saturate(1.6);-webkit-backdrop-filter:blur(22px) saturate(1.6);
+  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;resize:both;min-width:300px;min-height:200px}
+.bar{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid var(--line);cursor:grab;user-select:none}
+.bar .title{font-weight:600;font-size:12px;margin-right:auto;display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.state{font-size:10px;padding:1px 6px;border-radius:9px;border:1px solid var(--line);color:var(--muted)}
+.state.unlocked{color:#ff9f0a;border-color:#ff9f0a}
+.ib{width:26px;height:24px;border-radius:6px;border:0;background:transparent;color:var(--muted);cursor:pointer;display:grid;place-items:center;font-size:14px}
+.ib:hover{background:var(--line);color:var(--text)} .ib.active{color:#ff9f0a;background:rgba(255,159,10,.14)}
+.ib.danger:hover{color:var(--danger)}
+.fg{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--muted);margin-left:2px}
+.search{margin:7px 9px 0;display:flex;gap:6px}
+.search input{flex:1;border:1px solid var(--line);background:var(--card);color:var(--text);border-radius:7px;padding:5px 8px;font:inherit}
+.hint{font-size:10.5px;color:var(--muted);padding:5px 10px 0}
+kbd{font:10px ui-monospace,Menlo,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px}
+
+.sec{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:8px 10px 4px;display:flex;justify-content:space-between}
+/* horizontal strip */
+.strip{display:flex;gap:8px;overflow-x:auto;padding:2px 10px 10px;scroll-snap-type:x proximity}
+.strip .card{flex:0 0 118px;height:92px;scroll-snap-align:start}
+/* two-column */
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:0 10px 10px;max-height:300px}
+.col{overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-width:0}
+.cols .card{height:62px}
+.card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:7px 8px;
+  font-size:11.5px;overflow:hidden;cursor:pointer;transition:transform .12s,box-shadow .12s}
+.card:hover{box-shadow:0 0 0 2px var(--accent)}
+.card .txt{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.cols .card .txt{-webkit-line-clamp:2}
+.card .meta{position:absolute;right:6px;bottom:4px;font-size:9.5px;color:var(--muted)}
+.card .src{position:absolute;left:8px;bottom:4px;font-size:9.5px;color:var(--muted)}
+.card.code .txt{font:10.5px/1.35 ui-monospace,Menlo,monospace}
+.card.img{padding:0}
+.card.img .thumb{position:absolute;inset:0;background-size:cover;background-position:center}
+.card.img .meta{background:rgba(0,0,0,.45);color:#fff;border-radius:4px;padding:0 4px}
+.pin-badge{position:absolute;top:4px;right:6px;font-size:10px;opacity:.75}
+.card.ai{box-shadow:0 0 0 2px var(--ai)}
+.ai-badge{position:absolute;top:4px;right:6px;font-size:9.5px;background:var(--ai);color:#fff;border-radius:8px;padding:0 5px}
+.check{display:none;position:absolute;top:5px;left:5px;width:16px;height:16px;border-radius:50%;
+  border:1.5px solid var(--muted);background:var(--card);z-index:2}
+.card.sel .check{background:var(--accent);border-color:var(--accent)}
+.card.sel .check::after{content:"✓";color:#fff;font-size:10px;position:absolute;inset:0;display:grid;place-items:center}
+/* unlocked: Samsung-style jitter + checkboxes */
+.floater.unlocked .card{animation:jiggle .28s ease-in-out infinite alternate}
+.floater.unlocked .card:nth-child(2n){animation-delay:.09s}
+.floater.unlocked .card:nth-child(3n){animation-delay:.17s}
+.floater.unlocked .check{display:block}
+@keyframes jiggle{from{transform:rotate(-1.1deg)}to{transform:rotate(1.1deg)}}
+@media (prefers-reduced-motion: reduce){.floater.unlocked .card{animation:none;outline:1px dashed #ff9f0a}}
+.foot{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding:6px 9px;font-size:11px;color:var(--muted)}
+.foot .paste{margin-left:auto;display:flex;border-radius:7px;overflow:hidden;border:1px solid var(--accent)}
+.foot .paste button{border:0;background:var(--accent);color:#fff;font:inherit;font-weight:600;padding:4px 10px;cursor:pointer}
+.foot .paste button.arrow{background:transparent;color:var(--accent);padding:4px 7px;border-left:1px solid var(--accent)}
+/* confirm */
+.confirm{position:absolute;inset:0;background:rgba(0,0,0,.28);display:none;place-items:center;z-index:5}
+.confirm.show{display:grid}
+.confirm .box{background:var(--panel);backdrop-filter:blur(20px);border:1px solid var(--line);border-radius:12px;padding:14px;width:250px;box-shadow:var(--shadow)}
+.confirm .row{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.confirm button{border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--text);padding:5px 10px;font:inherit;cursor:pointer}
+.confirm button.d{background:var(--danger);color:#fff;border-color:var(--danger)}
+.legend{margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.legend div{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:9px;font-size:12px}
+.legend b{display:block;margin-bottom:3px}
+@media (max-width:720px){.fake-editor{display:none}.floater{position:relative;right:auto;top:auto;width:100%}}
+</style>
+</head>
+<body>
+<h1>Clipboard floater mockup (draft 1)</h1>
+<p class="note">Interactive draft built from the 2026-10-04 Samsung-parity spec. Use the buttons to switch view mode and lock state; click the trash to see the confirm step. Visual reference is pending your phone screen recording of the Samsung clipboard. This draft follows the public descriptions, which do not show the jitter animation.</p>
+<div class="controls">
+  <button id="mStrip" class="on">View: horizontal strip</button>
+  <button id="mCols">View: 2-column (pinned | recent)</button>
+  <button id="tLock">Toggle locked / unlocked (⌃⌘U / ⌃⌘L)</button>
+  <button id="tTheme">Toggle light / dark</button>
+</div>
+
+<div class="stage">
+  <div class="fake-editor">// your editor, cursor here<br>const reply = await agent.ask(<span class="caret"></span><br><br>// the floater stays on top, translucent,<br>// so you paste block after block in order.</div>
+
+  <div class="floater" id="fl">
+    <div class="bar" title="Drag to move · corner to resize">
+      <span class="title"><span class="dot"></span>Clipboard <span class="state" id="st">locked</span></span>
+      <label class="fg" title="Keep the floater above other windows"><input type="checkbox" checked> Float in foreground</label>
+      <button class="ib" id="pinBtn" title="Pin mode: unlock to select (⌃⌘U), click again to save &amp; lock (⌃⌘L)">📌</button>
+      <button class="ib danger" id="trashBtn" title="Delete selected (asks first)">🗑</button>
+      <button class="ib" title="Open the ZNON OS clipboard tab">↗</button>
+      <button class="ib" title="Close (Esc) · ⌃⌘V toggles">✕</button>
+    </div>
+    <div class="search"><input placeholder="Search clips…" aria-label="Search"></div>
+    <div class="hint" id="hint">Locked: click a block to paste at your cursor · <kbd>↑↓←→</kbd> move · <kbd>⏎</kbd> paste</div>
+    <div id="body"></div>
+    <div class="foot">
+      <span id="count"></span>
+      <div class="paste"><button title="Paste the suggested clip">Paste</button><button class="arrow" title="Hover or click: open the quick panel">▾</button></div>
+    </div>
+    <div class="confirm" id="cf"><div class="box"><b>Delete 2 clips?</b><div style="color:var(--muted);margin-top:4px">This also unpins them. It can't be undone.</div>
+      <div class="row"><button id="cfNo">Cancel</button><button class="d" id="cfYes">Delete</button></div></div></div>
+  </div>
+</div>
+
+<div class="legend">
+  <div><b>Top row: AI suggestion</b>Purple ring + "AI" badge. It only pre-selects the clip; ⏎ or a click pastes it. It's an advisory bonus, and the basics come first.</div>
+  <div><b>Locked (normal)</b>Click any block to paste where your cursor is. No checkboxes, no motion.</div>
+  <div><b>Unlocked (pin mode)</b>Blocks jitter and show checkboxes, as on Samsung. Click to add or remove a clip from the pinned set. The pin icon again (or ⌃⌘L) saves and locks.</div>
+  <div><b>Images</b>A real thumbnail of the image, never a generic icon, so you can tell several images apart.</div>
+</div>
+
+<script>
+const IMG1="data:image/svg+xml;utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 90"><rect width="120" height="90" fill="#2c3e50"/><rect x="8" y="10" width="60" height="6" fill="#3498db"/><rect x="8" y="22" width="90" height="4" fill="#95a5a6"/><rect x="8" y="30" width="70" height="4" fill="#95a5a6"/><rect x="8" y="44" width="104" height="38" fill="#1abc9c" opacity=".5"/></svg>');
+const IMG2="data:image/svg+xml;utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 90"><rect width="120" height="90" fill="#f4d03f"/><circle cx="35" cy="40" r="22" fill="#e67e22"/><rect x="62" y="20" width="48" height="50" fill="#c0392b" opacity=".8"/></svg>');
+const pinned=[
+  {t:"Thanks — I'll review and reply by EOD.",src:"Mail"},
+  {t:"cargo build --release && cargo test",code:1,src:"Terminal"},
+  {img:IMG2,meta:"logo.png"},
+  {t:"Quote exactly: \"advisory only — deterministic paste owns the action\"",src:"Notes"},
+  {t:"git log --oneline -5",code:1,src:"Terminal"},
+  {t:"Address line, 123 Example St",src:"Safari"},
+];
+const recent=[
+  {t:"const reply = await agent.ask(prompt, { timeoutMs: 30000 })",code:1,src:"Editor",ai:1,meta:"now"},
+  {img:IMG1,meta:"Screenshot 12:04"},
+  {t:"error[E0308]: mismatched types → expected `Bool`, found `bool`",code:1,src:"Terminal",meta:"2m"},
+  {t:"Summarize the three findings in one paragraph for the board.",src:"Chat",meta:"5m"},
+  {t:"https://github.com/example/project/pull/42",src:"Safari",meta:"9m"},
+  {t:"Meeting moved to 3:30 — same link.",src:"Messages",meta:"14m"},
+  {t:"SELECT id, created_at FROM items ORDER BY id DESC LIMIT 20;",code:1,src:"Editor",meta:"21m"},
+];
+let mode="strip", unlocked=false, sel=new Set();
+function card(c,i,kind){
+  const id=kind+i, cls=["card"]; if(c.code)cls.push("code"); if(c.img)cls.push("img"); if(c.ai)cls.push("ai"); if(sel.has(id))cls.push("sel");
+  const inner=c.img?`<div class="thumb" style="background-image:url('${c.img}')"></div>`:`<div class="txt">${c.t.replace(/</g,"&lt;")}</div>`;
+  const badge=c.ai?`<span class="ai-badge">AI</span>`:(kind==="p"?`<span class="pin-badge">📌</span>`:"");
+  return `<div class="${cls.join(" ")}" data-id="${id}"><span class="check"></span>${inner}${badge}${c.src?`<span class="src">${c.src}</span>`:""}${c.meta?`<span class="meta">${c.meta}</span>`:""}</div>`;
+}
+function render(){
+  const b=document.getElementById("body");
+  if(mode==="strip"){
+    const ai=recent.filter(c=>c.ai), rest=recent.filter(c=>!c.ai);
+    b.innerHTML=`<div class="sec"><span>Suggested · Pinned · Recent</span><span>scroll →</span></div>
+    <div class="strip">${ai.map((c,i)=>card(c,i,"a")).join("")}${pinned.map((c,i)=>card(c,i,"p")).join("")}${rest.map((c,i)=>card(c,i,"r")).join("")}</div>`;
+  } else {
+    b.innerHTML=`<div class="cols"><div class="col"><div class="sec"><span>Pinned</span><span>${pinned.length}/20</span></div>${pinned.map((c,i)=>card(c,i,"p")).join("")}</div>
+    <div class="col"><div class="sec"><span>Recent</span><span>${recent.length}/20</span></div>${recent.map((c,i)=>card(c,i,"r")).join("")}</div></div>`;
+  }
+  b.querySelectorAll(".card").forEach(el=>el.onclick=()=>{
+    if(!unlocked){flash(el);return;}
+    const id=el.dataset.id; sel.has(id)?sel.delete(id):sel.add(id); render();
+  });
+}
+function flash(el){el.style.boxShadow="0 0 0 3px #34c759";setTimeout(()=>el.style.boxShadow="",350)}
+function setLock(u){unlocked=u;const f=document.getElementById("fl");f.classList.toggle("unlocked",u);
+  document.getElementById("pinBtn").classList.toggle("active",u);
+  const st=document.getElementById("st");st.textContent=u?"unlocked: select":"locked";st.classList.toggle("unlocked",u);
+  document.getElementById("hint").innerHTML=u?"Unlocked: click blocks to add/remove from pinned · 📌 or <kbd>⌃⌘L</kbd> saves &amp; locks":"Locked: click a block to paste at your cursor · <kbd>↑↓←→</kbd> move · <kbd>⏎</kbd> paste";
+  if(!u)sel.clear(); render();}
+document.getElementById("mStrip").onclick=e=>{mode="strip";e.target.classList.add("on");document.getElementById("mCols").classList.remove("on");render()};
+document.getElementById("mCols").onclick=e=>{mode="cols";e.target.classList.add("on");document.getElementById("mStrip").classList.remove("on");render()};
+document.getElementById("tLock").onclick=()=>setLock(!unlocked);
+document.getElementById("pinBtn").onclick=()=>setLock(!unlocked);
+document.getElementById("trashBtn").onclick=()=>document.getElementById("cf").classList.add("show");
+document.getElementById("cfNo").onclick=document.getElementById("cfYes").onclick=()=>document.getElementById("cf").classList.remove("show");
+document.getElementById("tTheme").onclick=()=>{const r=document.documentElement;const dark=r.dataset.theme?r.dataset.theme==="dark":matchMedia("(prefers-color-scheme: dark)").matches;r.dataset.theme=dark?"light":"dark"};
+document.addEventListener("keydown",e=>{if(e.ctrlKey&&e.metaKey&&e.key.toLowerCase()==="u"){setLock(true);e.preventDefault()}if(e.ctrlKey&&e.metaKey&&e.key.toLowerCase()==="l"){setLock(false);e.preventDefault()}});
+document.getElementById("count").textContent=`${recent.length} recent · ${pinned.length} pinned`;
+render();
+</script>
+</body>
+</html>
