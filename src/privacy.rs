@@ -6,7 +6,7 @@
 //! - `org.nspasteboard.ConcealedType` — content must not be stored in history
 //! - `org.nspasteboard.TransientType` — temporary content; do not persist
 //!
-//! Clip Assistant checks pasteboard **types only** before reading payload data, so
+//! ZnonClip checks pasteboard **types only** before reading payload data, so
 //! secret bytes are never pulled into memory or written to SQLite.
 
 use log::info;

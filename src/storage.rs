@@ -1,7 +1,7 @@
 //! SQLite persistence for clipboard history and settings.
 //!
 //! Database lives at:
-//! `~/Library/Application Support/com.clipassistant.app/clip-assistant.db`
+//! `~/Library/Application Support/com.znonclip.app/znonclip.db`
 //!
 //! Uses WAL mode for efficient concurrent-style access (UI reads / poller writes
 //! on the main thread). Schema matches `ARCHITECTURE.md`.
@@ -27,11 +27,11 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 #[allow(dead_code)]
 pub const DEFAULT_MAX_ITEMS: usize = 10_000;
 
-/// Bundle-style application support folder name: `com.clipassistant.app`.
+/// Bundle-style application support folder name: `com.znonclip.app`.
 const APP_SUPPORT_QUALIFIER: &str = "com";
-const APP_SUPPORT_ORG: &str = "clipassistant";
+const APP_SUPPORT_ORG: &str = "znonclip";
 const APP_SUPPORT_APP: &str = "app";
-const DB_FILE_NAME: &str = "clip-assistant.db";
+const DB_FILE_NAME: &str = "znonclip.db";
 
 /// Errors from the storage layer.
 #[derive(Debug, Error)]
@@ -550,7 +550,7 @@ pub struct PasteStats {
 }
 
 pub(crate) fn app_support_dir() -> Result<PathBuf> {
-    // ProjectDirs → ~/Library/Application Support/com.clipassistant.app on macOS
+    // ProjectDirs → ~/Library/Application Support/com.znonclip.app on macOS
     let dirs = ProjectDirs::from(APP_SUPPORT_QUALIFIER, APP_SUPPORT_ORG, APP_SUPPORT_APP)
         .ok_or(StorageError::NoProjectDirs)?;
     Ok(dirs.data_dir().to_path_buf())
@@ -634,7 +634,7 @@ fn format_unix_ms_iso8601(ms: u64) -> String {
 fn unix_secs_to_utc_parts(mut secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     // Algorithm based on civil_from_days (Howard Hinnant).
     if secs < 0 {
-        // Clip Assistant targets modern macOS; negative timestamps are unexpected.
+        // ZnonClip targets modern macOS; negative timestamps are unexpected.
         warn!("negative unix timestamp; clamping to 0");
         secs = 0;
     }
@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn insert_query_dedup_and_prune() {
-        let dir = std::env::temp_dir().join(format!("clip-assistant-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("znonclip-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("test.db");

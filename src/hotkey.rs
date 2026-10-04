@@ -102,8 +102,8 @@ const CMD_KEY: u32 = 1 << 8;
 const SHIFT_KEY: u32 = 1 << 9;
 const OPTION_KEY: u32 = 1 << 11;
 const CONTROL_KEY: u32 = 1 << 12;
-/// Hotkey signature ('CLAS').
-const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"CLAS");
+/// Hotkey signature ('ZNCL').
+const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"ZNCL");
 
 /// The Carbon handler is installed once per process.
 static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -312,7 +312,7 @@ fn dispatch_nav_key_to_delegate(code: u16) -> bool {
     let Some(delegate) = app.delegate() else {
         return false;
     };
-    // SAFETY: ClipAssistantAppDelegate implements popoverNavKey: (NSInteger) -> BOOL.
+    // SAFETY: ZnonClipAppDelegate implements popoverNavKey: (NSInteger) -> BOOL.
     unsafe { msg_send![&*delegate, popoverNavKey: code as isize] }
 }
 
@@ -324,7 +324,7 @@ fn dispatch_pin_mode_to_delegate(unlock: bool) {
     let Some(delegate) = app.delegate() else {
         return;
     };
-    // SAFETY: ClipAssistantAppDelegate implements hotkeyPinMode: (NSInteger).
+    // SAFETY: ZnonClipAppDelegate implements hotkeyPinMode: (NSInteger).
     let _: () = unsafe { msg_send![&*delegate, hotkeyPinMode: unlock as isize] };
 }
 
@@ -337,7 +337,7 @@ fn dispatch_hotkey_to_delegate() {
     let Some(delegate) = app.delegate() else {
         return;
     };
-    // SAFETY: ClipAssistantAppDelegate implements hotkeyTogglePopover:.
+    // SAFETY: ZnonClipAppDelegate implements hotkeyTogglePopover:.
     let _: () = unsafe {
         msg_send![&*delegate, hotkeyTogglePopover: Option::<&AnyObject>::None]
     };

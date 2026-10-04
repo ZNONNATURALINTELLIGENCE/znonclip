@@ -32,7 +32,7 @@ use crate::storage::{Storage, DEFAULT_CACHE_LIMIT};
 /// Delay before posting ⌘V so the previous app can regain focus after popover close.
 const AUTO_PASTE_DELAY_SECS: f64 = 0.15;
 
-/// Instance state for the Objective-C `ClipAssistantAppDelegate` class.
+/// Instance state for the Objective-C `ZnonClipAppDelegate` class.
 pub struct AppDelegateIvars {
     status: RefCell<Option<StatusItemController>>,
     history: Rc<RefCell<History>>,
@@ -76,18 +76,18 @@ impl Default for AppDelegateIvars {
 define_class!(
     // SAFETY:
     // - NSObject has no subclassing requirements beyond normal NSObject rules.
-    // - ClipAssistantAppDelegate does not implement Drop (hotkey cleaned via Option drop if we don't forget).
+    // - ZnonClipAppDelegate does not implement Drop (hotkey cleaned via Option drop if we don't forget).
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[name = "ClipAssistantAppDelegate"]
+    #[name = "ZnonClipAppDelegate"]
     #[ivars = AppDelegateIvars]
-    pub struct ClipAssistantAppDelegate;
+    pub struct ZnonClipAppDelegate;
 
     // SAFETY: NSObjectProtocol has no additional requirements.
-    unsafe impl NSObjectProtocol for ClipAssistantAppDelegate {}
+    unsafe impl NSObjectProtocol for ZnonClipAppDelegate {}
 
     // SAFETY: NSWindowDelegate has no additional requirements.
-    unsafe impl NSWindowDelegate for ClipAssistantAppDelegate {
+    unsafe impl NSWindowDelegate for ZnonClipAppDelegate {
         /// The floater was resized: re-lay out the rows to the new width.
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
@@ -98,7 +98,7 @@ define_class!(
     }
 
     // SAFETY: NSApplicationDelegate has no additional requirements.
-    unsafe impl NSApplicationDelegate for ClipAssistantAppDelegate {
+    unsafe impl NSApplicationDelegate for ZnonClipAppDelegate {
         // SAFETY: Signature matches applicationDidFinishLaunching:.
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _notification: &NSNotification) {
@@ -170,7 +170,7 @@ define_class!(
 
             let s = self.ivars().settings.borrow().clone();
             info!(
-                "Clip Assistant ready — hotkey {}, poll {}ms, auto_paste={}",
+                "ZnonClip ready — hotkey {}, poll {}ms, auto_paste={}",
                 s.hotkey.display(),
                 s.poll_interval_ms,
                 s.auto_paste
@@ -178,7 +178,7 @@ define_class!(
         }
     }
 
-    impl ClipAssistantAppDelegate {
+    impl ZnonClipAppDelegate {
         // SAFETY: IBAction-style (sender: id).
         #[unsafe(method(togglePopover:))]
         fn toggle_popover(&self, _sender: Option<&AnyObject>) {
@@ -582,7 +582,7 @@ define_class!(
                 let _ = accessibility::ensure_trusted_prompting();
                 if let Some(ref status) = *self.ivars().status.borrow() {
                     status.set_status_notice(Some(
-                        "Enable Clip Assistant in Accessibility, then restart for auto-paste",
+                        "Enable ZnonClip in Accessibility, then restart for auto-paste",
                     ));
                 }
             } else if let Some(ref status) = *self.ivars().status.borrow() {
@@ -849,7 +849,7 @@ define_class!(
     }
 );
 
-impl ClipAssistantAppDelegate {
+impl ZnonClipAppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AppDelegateIvars::default());
         // SAFETY: NSObject init signature is correct.
@@ -1102,7 +1102,7 @@ pub fn run() {
     let mtm = MainThreadMarker::new().expect("UI must run on the main thread");
 
     let app = NSApplication::sharedApplication(mtm);
-    let delegate = ClipAssistantAppDelegate::new(mtm);
+    let delegate = ZnonClipAppDelegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     std::mem::forget(delegate);

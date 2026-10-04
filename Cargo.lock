@@ -126,25 +126,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "clip-assistant"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "block2",
- "directories",
- "env_logger",
- "log",
- "objc2",
- "objc2-app-kit",
- "objc2-core-graphics",
- "objc2-foundation",
- "rusqlite",
- "serde_json",
- "sha2",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -953,3 +934,22 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "znonclip"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "block2",
+ "directories",
+ "env_logger",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+]

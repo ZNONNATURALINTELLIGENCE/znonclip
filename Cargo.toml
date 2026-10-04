@@ -1,12 +1,12 @@
 [package]
-name = "clip-assistant"
+name = "znonclip"
 version = "0.2.0"
 edition = "2021"
 description = "Lightweight macOS menu-bar clipboard manager with local, advisory predictive paste"
-authors = ["Clip Assistant contributors", "ClipPin Contributors (upstream)"]
+authors = ["ZnonClip contributors", "ClipPin Contributors (upstream)"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/ZNONNATURALINTELLIGENCE/clip-assistant"
+repository = "https://github.com/ZNONNATURALINTELLIGENCE/znonclip"
 keywords = ["clipboard", "macos", "menu-bar", "productivity"]
 categories = ["gui", "os::macos-apis"]
 
@@ -95,14 +95,14 @@ sha2 = "0.10"
 serde_json = "1"
 
 [package.metadata.bundle]
-name = "Clip Assistant"
-identifier = "com.clipassistant.app"
+name = "ZnonClip"
+identifier = "com.znonclip.app"
 # Agent app: no Dock icon, no main menu bar (merged via Info.plist)
 osx_info_plist_exts = ["Info.plist"]
 category = "public.app-category.utilities"
 short_description = "Lightweight macOS menu-bar clipboard history manager"
 long_description = """
-Clip Assistant is a local-first clipboard manager that lives in the macOS menu bar.
+ZnonClip is a local-first clipboard manager that lives in the macOS menu bar.
 It monitors clipboard changes, stores searchable history, and supports pin,
 search, global hotkey, auto-paste, and a local advisory ranker that
 pre-highlights the item you most likely want to paste.
@@ -110,5 +110,5 @@ pre-highlights the item you most likely want to paste.
 osx_minimum_system_version = "13.0"
 
 [[bin]]
-name = "clip-assistant"
+name = "znonclip"
 path = "src/main.rs"

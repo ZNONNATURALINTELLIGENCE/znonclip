@@ -1,4 +1,4 @@
-# Clip Assistant
+# ZnonClip
 
 A small, native macOS menu-bar clipboard manager. It keeps your **last 20 copies**
 and up to **20 pins**, opens with a hotkey or a click on the menu-bar icon (left,
@@ -8,9 +8,9 @@ paste**, so the usual case is a single key: Enter.
 It is written in Rust with native AppKit: no Electron, no webview. Everything
 stays on your Mac.
 
-> Clip Assistant is a fork of **[ClipPin](https://github.com/kushwahramkumar2003/clippin)**
+> ZnonClip is a fork of **[ClipPin](https://github.com/kushwahramkumar2003/clippin)**
 > by the ClipPin contributors (MIT). The menu-bar shell, privacy filter, SQLite
-> store, hotkey and auto-paste come from ClipPin. Clip Assistant adds the
+> store, hotkey and auto-paste come from ClipPin. ZnonClip adds the
 > predictive highlight, keyboard paste, right-click and two-finger-click opening,
 > source and target app tracking, and the 20/20 working set.
 
@@ -21,32 +21,32 @@ stays on your Mac.
 ## Install
 
 ```bash
-git clone https://github.com/ZNONNATURALINTELLIGENCE/clip-assistant.git
-cd clip-assistant
+git clone https://github.com/ZNONNATURALINTELLIGENCE/znonclip.git
+cd znonclip
 cargo install --path . --locked
 ```
 
 ### Run
 
 ```bash
-clip-assistant --detach     # background; the terminal can close
-clip-assistant              # foreground, with logs (useful for debugging)
+znonclip --detach     # background; the terminal can close
+znonclip              # foreground, with logs (useful for debugging)
 ```
 
 The app lives in the **menu bar** and has no Dock icon.
 
 | | |
 |--|--|
-| **Stop** | `pkill -x clip-assistant` |
-| **Logs** | `~/Library/Logs/ClipAssistant/clip-assistant.log` (detached mode) |
-| **Help** | `clip-assistant --help` |
+| **Stop** | `pkill -x znonclip` |
+| **Logs** | `~/Library/Logs/ZnonClip/znonclip.log` (detached mode) |
+| **Help** | `znonclip --help` |
 
 ### Uninstall
 
 ```bash
-cargo uninstall clip-assistant
-rm -rf ~/Library/Application\ Support/com.clipassistant.app      # history + settings
-rm -f ~/Library/LaunchAgents/com.clipassistant.app.plist          # if you used launch at login
+cargo uninstall znonclip
+rm -rf ~/Library/Application\ Support/com.znonclip.app      # history + settings
+rm -f ~/Library/LaunchAgents/com.znonclip.app.plist          # if you used launch at login
 ```
 
 ---
@@ -55,7 +55,7 @@ rm -f ~/Library/LaunchAgents/com.clipassistant.app.plist          # if you used 
 
 | Action | How |
 |---|---|
-| Open | **⌘⇧V**, or click the menu-bar icon (left, right or two-finger) |
+| Open | **⌃⌘V**, or click the menu-bar icon (left, right or two-finger) |
 | Paste the suggested item | **Enter** |
 | Pick another | **↑ / ↓**, then Enter, or click a row |
 | Close | **Esc** (focus returns to your app) |
@@ -104,9 +104,10 @@ Idle memory is measured, not estimated. To check it on your own Mac:
 scripts/measure-rss.sh
 ```
 
-Measured on Apple Silicon: **TBD (filled in after the first verified run)**.
+Measured on an Apple Silicon Mac (macOS 26), 20 items in history, floater built
+and idle: **17 MB phys_footprint** (the number Activity Monitor shows), 12 MB RSS.
 
 ## License
 
 MIT. See [LICENSE](LICENSE). Original work © the ClipPin contributors;
-modifications © the Clip Assistant contributors.
+modifications © the ZnonClip contributors.

@@ -1,11 +1,11 @@
-//! Clip Assistant — macOS menu-bar clipboard history manager.
+//! ZnonClip — macOS menu-bar clipboard history manager.
 //!
 //! Entry point: initializes logging and starts the AppKit application.
 //!
 //! ```text
-//! clip-assistant              # run in the foreground (terminal stays attached)
-//! clip-assistant --detach     # spawn in the background and return immediately
-//! clip-assistant -d           # short form of --detach
+//! znonclip              # run in the foreground (terminal stays attached)
+//! znonclip --detach     # spawn in the background and return immediately
+//! znonclip -d           # short form of --detach
 //! ```
 
 mod accessibility;
@@ -46,7 +46,7 @@ fn main() {
         // Check (and release) the lock first so the user hears "already running"
         // instead of a silent second process that exits on its own.
         if let instance::Acquire::AlreadyRunning = instance::acquire() {
-            eprintln!("clip-assistant: already running (one instance only)");
+            eprintln!("znonclip: already running (one instance only)");
             std::process::exit(0);
         }
         detach_and_exit(&child_args);
@@ -58,8 +58,8 @@ fn main() {
     let _instance_lock = match instance::acquire() {
         instance::Acquire::Acquired(f) => Some(f),
         instance::Acquire::AlreadyRunning => {
-            info!("another Clip Assistant instance is running — exiting");
-            eprintln!("clip-assistant: already running (one instance only)");
+            info!("another ZnonClip instance is running — exiting");
+            eprintln!("znonclip: already running (one instance only)");
             return;
         }
         instance::Acquire::Unavailable(e) => {
@@ -69,9 +69,9 @@ fn main() {
     };
 
     if env::var_os(launch::AUTOSTART_ENV).is_some() {
-        info!("Clip Assistant starting (launchd autostart — no Terminal)");
+        info!("ZnonClip starting (launchd autostart — no Terminal)");
     } else {
-        info!("Clip Assistant starting");
+        info!("ZnonClip starting");
     }
     app::run();
 }
@@ -84,11 +84,11 @@ fn print_help() {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "clip-assistant".into());
+        .unwrap_or_else(|| "znonclip".into());
 
     println!(
         "\
-Clip Assistant — macOS menu-bar clipboard history
+ZnonClip — macOS menu-bar clipboard history
 
 USAGE:
     {name} [OPTIONS]
@@ -102,8 +102,8 @@ EXAMPLES:
     {name} -d        Detached / independent process
     {name} --detach
 
-Detached logs: ~/Library/Logs/ClipAssistant/clip-assistant.log
-Stop:          pkill -x clip-assistant
+Detached logs: ~/Library/Logs/ZnonClip/znonclip.log
+Stop:          pkill -x znonclip
 "
     );
 }
@@ -113,7 +113,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
     let exe = match env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("clip-assistant: cannot resolve executable path: {e}");
+            eprintln!("znonclip: cannot resolve executable path: {e}");
             std::process::exit(1);
         }
     };
@@ -121,7 +121,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
     let mut cmd = Command::new(&exe);
     cmd.args(child_args);
     cmd.stdin(Stdio::null());
-    cmd.env_remove("CLIP_ASSISTANT_DETACH_CHILD"); // clean slate
+    cmd.env_remove("ZNONCLIP_DETACH_CHILD"); // clean slate
 
     // Prefer a log file so detached runs are still diagnosable.
     match open_detach_log() {
@@ -136,7 +136,7 @@ fn detach_and_exit(child_args: &[String]) -> ! {
             }
         },
         Err(e) => {
-            eprintln!("clip-assistant: warning: could not open log file ({e}); discarding output");
+            eprintln!("znonclip: warning: could not open log file ({e}); discarding output");
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
         }
@@ -164,14 +164,14 @@ fn detach_and_exit(child_args: &[String]) -> ! {
                 .map(|p| format!("\n  logs: {}", p.display()))
                 .unwrap_or_default();
             eprintln!(
-                "Clip Assistant started in background (pid {}){}",
+                "ZnonClip started in background (pid {}){}",
                 child.id(),
                 log_hint
             );
             std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("clip-assistant: failed to start detached process: {e}");
+            eprintln!("znonclip: failed to start detached process: {e}");
             std::process::exit(1);
         }
     }
@@ -183,8 +183,8 @@ fn detach_log_path() -> Option<PathBuf> {
         PathBuf::from(home)
             .join("Library")
             .join("Logs")
-            .join("ClipAssistant")
-            .join("clip-assistant.log"),
+            .join("ZnonClip")
+            .join("znonclip.log"),
     )
 }
 

@@ -47,7 +47,7 @@ pub const POPOVER_HEIGHT: f64 = 500.0;
 const MIN_W: f64 = 320.0;
 const MIN_H: f64 = 260.0;
 /// Frame autosave key (NSUserDefaults).
-const FRAME_AUTOSAVE: &str = "ClipAssistantFloater";
+const FRAME_AUTOSAVE: &str = "ZnonClipFloater";
 
 const HEADER_H: f64 = 30.0;
 const SEARCH_H: f64 = 28.0;
@@ -117,14 +117,14 @@ impl StatusItemController {
         if let Some(button) = status_item.button(mtm) {
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
                 ns_string!("clipboard"),
-                Some(ns_string!("Clip Assistant clipboard history")),
+                Some(ns_string!("ZnonClip clipboard history")),
             ) {
                 image.setTemplate(true);
                 button.setImage(Some(&image));
             } else {
                 button.setTitle(ns_string!("📋"));
             }
-            button.setToolTip(Some(ns_string!("Clip Assistant — Clipboard History")));
+            button.setToolTip(Some(ns_string!("ZnonClip — Clipboard History")));
             // Open on left click AND right / two-finger click (default is left only).
             button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
         }
@@ -750,7 +750,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     let header_y = POPOVER_HEIGHT - HEADER_H - 14.0;
 
     // Wordmark — medium weight, primary label (not heavy bold).
-    let header = NSTextField::labelWithString(ns_string!("Clip Assistant"), mtm);
+    let header = NSTextField::labelWithString(ns_string!("ZnonClip"), mtm);
     header.setFrame(NSRect::new(
         NSPoint::new(PAD, header_y),
         NSSize::new(140.0, HEADER_H - 6.0),
@@ -1166,7 +1166,7 @@ fn build_settings_panel(mtm: MainThreadMarker) -> Retained<NSView> {
     ));
     launch_cb.setFont(Some(&NSFont::systemFontOfSize(12.0)));
     launch_cb.setToolTip(Some(ns_string!(
-        "Start Clip Assistant when you log in. Uses SMAppService for .app installs, or a LaunchAgent for cargo/dev builds."
+        "Start ZnonClip when you log in. Uses SMAppService for .app installs, or a LaunchAgent for cargo/dev builds."
     )));
     launch_cb.setTag(5);
     panel.addSubview(&launch_cb);
@@ -1517,7 +1517,7 @@ fn format_relative_time(created_at: &str) -> String {
     format!("{}y", delta / (86400 * 365))
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SS[.mmm]Z` (Clip Assistant storage format) to unix seconds.
+/// Parse `YYYY-MM-DDTHH:MM:SS[.mmm]Z` (ZnonClip storage format) to unix seconds.
 pub(crate) fn parse_iso8601_to_unix_secs(s: &str) -> Option<i64> {
     let s = s.trim().trim_end_matches('Z');
     let (date, time) = s.split_once('T')?;

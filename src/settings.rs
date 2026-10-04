@@ -93,7 +93,7 @@ pub struct Settings {
     pub history_limit: usize,
     /// Whether to auto-paste (⌘V) after selecting an item.
     pub auto_paste: bool,
-    /// Whether to launch Clip Assistant at login (SMAppService).
+    /// Whether to launch ZnonClip at login (SMAppService).
     pub launch_at_login: bool,
     /// Global hotkey preset.
     pub hotkey: HotkeyPreset,

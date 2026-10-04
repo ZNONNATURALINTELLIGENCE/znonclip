@@ -1,7 +1,7 @@
 //! Accessibility permission helpers (`AXIsProcessTrusted`).
 //!
 //! Global event taps and synthesized keystrokes (auto-paste) require the user
-//! to enable Clip Assistant under **System Settings → Privacy & Security → Accessibility**.
+//! to enable ZnonClip under **System Settings → Privacy & Security → Accessibility**.
 
 use log::{info, warn};
 use std::ffi::c_void;
@@ -41,8 +41,8 @@ pub fn ensure_trusted_prompting() -> bool {
         open_accessibility_settings();
         warn!(
             "Accessibility permission required for auto-paste. \
-             Enable Clip Assistant in System Settings → Privacy & Security → Accessibility, \
-             then restart Clip Assistant."
+             Enable ZnonClip in System Settings → Privacy & Security → Accessibility, \
+             then restart ZnonClip."
         );
     }
     trusted
