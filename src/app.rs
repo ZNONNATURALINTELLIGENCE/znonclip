@@ -12,7 +12,7 @@ use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSEventType, NSRunningApplication, NSSearchField, NSStatusItem,
-    NSWorkspace,
+    NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSTimer};
 
@@ -86,6 +86,17 @@ define_class!(
     // SAFETY: NSObjectProtocol has no additional requirements.
     unsafe impl NSObjectProtocol for ClipAssistantAppDelegate {}
 
+    // SAFETY: NSWindowDelegate has no additional requirements.
+    unsafe impl NSWindowDelegate for ClipAssistantAppDelegate {
+        /// The floater was resized: re-lay out the rows to the new width.
+        #[unsafe(method(windowDidResize:))]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            let mtm = self.mtm();
+            let target: *const AnyObject = (self as *const Self).cast();
+            self.reload_list(mtm, unsafe { &*target });
+        }
+    }
+
     // SAFETY: NSApplicationDelegate has no additional requirements.
     unsafe impl NSApplicationDelegate for ClipAssistantAppDelegate {
         // SAFETY: Signature matches applicationDidFinishLaunching:.
@@ -135,6 +146,9 @@ define_class!(
                     button.setAction(Some(sel!(togglePopover:)));
                 }
                 controller.set_action_target(&*target);
+                controller
+                    .panel
+                    .setDelegate(Some(ProtocolObject::from_ref(self)));
             }
 
             controller.refresh_history(mtm, &self.ivars().history.borrow(), unsafe {
@@ -187,7 +201,7 @@ define_class!(
             let Some(status) = status_ref.as_ref() else {
                 return Bool::NO;
             };
-            if !status.popover.isShown() || status.is_select_mode() || status.settings_visible() {
+            if !status.is_shown() || status.is_select_mode() || status.settings_visible() {
                 return Bool::NO;
             }
             match code as u16 {
@@ -209,10 +223,9 @@ define_class!(
                     Bool::YES
                 }
                 hotkey::KEY_ESCAPE => {
-                    status.popover.close();
-                    if let Some(ref app) = *self.ivars().target_app.borrow() {
-                        let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
-                    }
+                    info!("floater close via Esc");
+                    drop(status_ref);
+                    self.hide_floater();
                     Bool::YES
                 }
                 _ => Bool::NO,
@@ -224,6 +237,51 @@ define_class!(
         #[unsafe(method(hotkeyTogglePopover:))]
         fn hotkey_toggle_popover(&self, _sender: Option<&AnyObject>) {
             self.toggle_popover_impl("hotkey");
+        }
+
+        /// "Float on top" checkbox.
+        // SAFETY: control action.
+        #[unsafe(method(toggleFloat:))]
+        fn toggle_float(&self, _sender: Option<&AnyObject>) {
+            let on = self
+                .ivars()
+                .status
+                .borrow()
+                .as_ref()
+                .is_some_and(|s| s.is_float_checked());
+            self.ivars().settings.borrow_mut().float_panel = on;
+            self.persist_settings();
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.set_float_on_top(on);
+                status.set_status_notice(Some(if on {
+                    "Float on top: stays open after paste"
+                } else {
+                    "Float off: closes after paste or an outside click"
+                }));
+            }
+            info!("float_on_top → {on}");
+        }
+
+        /// ⌃⌘U (unlock = 1) / ⌃⌘L (lock = 0). Registered only while the floater
+        /// is visible. P0 maps unlock/lock to the multi-select mode; the full
+        /// Samsung pin-mode semantics (jitter, add/remove from pins) land in P3.
+        // SAFETY: called from the Carbon hotkey handler with an NSInteger.
+        #[unsafe(method(hotkeyPinMode:))]
+        fn hotkey_pin_mode(&self, unlock: isize) {
+            let mtm = self.mtm();
+            let target: *const AnyObject = (self as *const Self).cast();
+            let unlock = unlock != 0;
+            info!("pin mode → {} via hotkey", if unlock { "unlocked" } else { "locked" });
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.show_history();
+                status.set_select_mode(unlock);
+                status.set_status_notice(Some(if unlock {
+                    "Unlocked: select items (⌃⌘L to lock)"
+                } else {
+                    "Locked"
+                }));
+            }
+            self.reload_list(mtm, unsafe { &*target });
         }
 
         /// Gear button — show/hide settings panel.
@@ -317,7 +375,10 @@ define_class!(
             // Rebind monitors.
             let old = self.ivars().hotkey.borrow_mut().take();
             if let Some(mgr) = old {
-                *self.ivars().hotkey.borrow_mut() = Some(mgr.rebind(preset, mtm));
+                let mut mgr = mgr.rebind(preset, mtm);
+                // Settings are edited inside the floater, so it is visible now.
+                mgr.set_pin_keys_active(true);
+                *self.ivars().hotkey.borrow_mut() = Some(mgr);
             } else {
                 *self.ivars().hotkey.borrow_mut() = Some(HotkeyManager::register(preset, mtm));
             }
@@ -803,7 +864,7 @@ impl ClipAssistantAppDelegate {
             .status
             .borrow()
             .as_ref()
-            .is_some_and(|s| !s.popover.isShown());
+            .is_some_and(|s| !s.is_shown());
         info!("popover {} via {via}", if opening { "open" } else { "close" });
         if opening {
             self.capture_target_app();
@@ -815,6 +876,9 @@ impl ClipAssistantAppDelegate {
                 &*target
             });
             status.toggle_popover(mtm);
+        }
+        if let Some(ref mut hk) = *self.ivars().hotkey.borrow_mut() {
+            hk.set_pin_keys_active(opening);
         }
     }
 
@@ -912,15 +976,29 @@ impl ClipAssistantAppDelegate {
             }
         }
 
-        if let Some(ref status) = *self.ivars().status.borrow() {
-            if status.popover.isShown() {
-                status.popover.close();
+        // The floater never activates this app, so the target app is still the
+        // active one. Floating: stay visible but hand keyboard focus back.
+        // Not floating: close, like a menu.
+        let float = self
+            .ivars()
+            .status
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.float_on_top());
+        if float {
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.release_focus();
             }
+        } else {
+            self.hide_floater();
         }
 
-        // Hand focus back to where the user was, so ⌘V lands there.
-        if let Some(ref app) = *self.ivars().target_app.borrow() {
-            let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
+        // Fallback: if this app did become active (e.g. a settings menu was
+        // used), hand activation back to where the user was.
+        if NSApplication::sharedApplication(self.mtm()).isActive() {
+            if let Some(ref app) = *self.ivars().target_app.borrow() {
+                let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
+            }
         }
 
         let auto_paste = self.ivars().settings.borrow().auto_paste;
@@ -933,6 +1011,16 @@ impl ClipAssistantAppDelegate {
             "pasted item id={id} → {} (auto_paste={auto_paste})",
             target_bundle.as_deref().unwrap_or("(unknown)")
         );
+    }
+
+    /// Hide the floater and release ⌃⌘U / ⌃⌘L.
+    fn hide_floater(&self) {
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.close();
+        }
+        if let Some(ref mut hk) = *self.ivars().hotkey.borrow_mut() {
+            hk.set_pin_keys_active(false);
+        }
     }
 
     fn persist_settings(&self) {

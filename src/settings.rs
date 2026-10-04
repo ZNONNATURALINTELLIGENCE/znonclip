@@ -12,11 +12,13 @@ const KEY_RETENTION_DAYS: &str = "retention_days";
 const KEY_HISTORY_LIMIT: &str = "history_limit";
 const KEY_HOTKEY: &str = "hotkey_preset";
 const KEY_LAUNCH_AT_LOGIN: &str = "launch_at_login";
+const KEY_FLOAT_PANEL: &str = "float_panel";
 
 /// Preset global hotkey combinations (v1 — dropdown, not free-form recorder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HotkeyPreset {
     #[default]
+    CtrlCmdV,
     CmdShiftV,
     CmdShiftC,
     CmdOptionV,
@@ -24,7 +26,8 @@ pub enum HotkeyPreset {
 }
 
 impl HotkeyPreset {
-    pub const ALL: [HotkeyPreset; 4] = [
+    pub const ALL: [HotkeyPreset; 5] = [
+        Self::CtrlCmdV,
         Self::CmdShiftV,
         Self::CmdShiftC,
         Self::CmdOptionV,
@@ -33,6 +36,7 @@ impl HotkeyPreset {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CtrlCmdV => "ctrl+cmd+v",
             Self::CmdShiftV => "cmd+shift+v",
             Self::CmdShiftC => "cmd+shift+c",
             Self::CmdOptionV => "cmd+option+v",
@@ -42,6 +46,7 @@ impl HotkeyPreset {
 
     pub fn display(self) -> &'static str {
         match self {
+            Self::CtrlCmdV => "⌃⌘V",
             Self::CmdShiftV => "⌘⇧V",
             Self::CmdShiftC => "⌘⇧C",
             Self::CmdOptionV => "⌘⌥V",
@@ -51,10 +56,11 @@ impl HotkeyPreset {
 
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
+            "cmd+shift+v" | "command+shift+v" => Self::CmdShiftV,
             "cmd+shift+c" | "command+shift+c" => Self::CmdShiftC,
             "cmd+option+v" | "cmd+alt+v" | "command+option+v" => Self::CmdOptionV,
             "ctrl+shift+v" | "control+shift+v" => Self::CtrlShiftV,
-            _ => Self::CmdShiftV,
+            _ => Self::CtrlCmdV,
         }
     }
 
@@ -70,7 +76,7 @@ impl HotkeyPreset {
     /// Carbon virtual key code for the letter key.
     pub fn key_code(self) -> u16 {
         match self {
-            Self::CmdShiftV | Self::CmdOptionV | Self::CtrlShiftV => 0x09, // V
+            Self::CtrlCmdV | Self::CmdShiftV | Self::CmdOptionV | Self::CtrlShiftV => 0x09, // V
             Self::CmdShiftC => 0x08,                                       // C
         }
     }
@@ -91,6 +97,9 @@ pub struct Settings {
     pub launch_at_login: bool,
     /// Global hotkey preset.
     pub hotkey: HotkeyPreset,
+    /// Keep the floater above other windows and open after a paste.
+    /// Off: it behaves like a menu and closes on paste or an outside click.
+    pub float_panel: bool,
 }
 
 impl Default for Settings {
@@ -104,6 +113,7 @@ impl Default for Settings {
             auto_paste: true,
             launch_at_login: false,
             hotkey: HotkeyPreset::default(),
+            float_panel: true,
         }
     }
 }
@@ -152,6 +162,9 @@ impl Settings {
         if let Ok(Some(v)) = storage.get_setting(KEY_LAUNCH_AT_LOGIN) {
             s.launch_at_login = parse_bool(&v);
         }
+        if let Ok(Some(v)) = storage.get_setting(KEY_FLOAT_PANEL) {
+            s.float_panel = parse_bool(&v);
+        }
 
         info!(
             "settings loaded (poll={}ms, retention={}d, limit={}, auto_paste={}, hotkey={}, login={})",
@@ -177,6 +190,7 @@ impl Settings {
             KEY_LAUNCH_AT_LOGIN,
             if self.launch_at_login { "1" } else { "0" },
         );
+        self.save_key(storage, KEY_FLOAT_PANEL, if self.float_panel { "1" } else { "0" });
     }
 
     /// Persist auto-paste flag.

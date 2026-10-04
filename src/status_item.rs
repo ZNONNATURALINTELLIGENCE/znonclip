@@ -1,4 +1,10 @@
-//! Menu bar icon (`NSStatusItem`) and popover (`NSPopover`) management.
+//! Menu bar icon (`NSStatusItem`) and the floater (`NSPanel`).
+//!
+//! The floater is a translucent, draggable, resizable, non-activating panel:
+//! it can take keyboard focus for search and arrow keys without making this app
+//! the active app, so the app you were typing in stays active and receives the
+//! paste. With "Float on top" it stays above other windows and remains open
+//! after a paste; without it, it closes on paste or on a click elsewhere.
 //!
 //! Visual language: macOS menu-bar utilities (Little Snitch Mini–adjacent) —
 //! system semantic colors, quiet chrome, clear hierarchy, SF Symbols, compact rows.
@@ -6,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
@@ -18,11 +25,13 @@ use objc2_app_kit::{
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventMask, NSFont,
     NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSImage, NSImageScaling,
     NSImageSymbolConfiguration, NSImageSymbolScale, NSLineBreakMode, NSMenu, NSMenuItem,
-    NSPopUpButton, NSPopover, NSPopoverBehavior, NSScrollView, NSSearchField, NSStatusBar,
-    NSStatusItem, NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSViewController,
-    NSVariableStatusItemLength,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSFloatingWindowLevel, NSNormalWindowLevel,
+    NSPanel, NSPopUpButton, NSScrollView, NSSearchField, NSStatusBar, NSStatusItem,
+    NSTextAlignment, NSTextField, NSTitlePosition, NSVariableStatusItemLength, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{ns_string, NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
 
 use crate::clipboard::{ClipboardItem, History};
 use crate::settings::{
@@ -30,9 +39,15 @@ use crate::settings::{
     DEFAULT_HISTORY_ITEMS, HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
 };
 
-/// Fixed popover content size (points) — compact utility panel, not a window.
+/// Initial floater content size (points). The user can resize it; the size and
+/// position are remembered (frame autosave).
 pub const POPOVER_WIDTH: f64 = 380.0;
 pub const POPOVER_HEIGHT: f64 = 500.0;
+/// Smallest floater the layout supports.
+const MIN_W: f64 = 320.0;
+const MIN_H: f64 = 260.0;
+/// Frame autosave key (NSUserDefaults).
+const FRAME_AUTOSAVE: &str = "ClipAssistantFloater";
 
 const HEADER_H: f64 = 30.0;
 const SEARCH_H: f64 = 28.0;
@@ -49,7 +64,13 @@ const TIME_COL: f64 = 44.0;
 /// Owns strong refs for the menu-bar UI (must not drop while app runs).
 pub struct StatusItemController {
     pub status_item: Retained<NSStatusItem>,
-    pub popover: Retained<NSPopover>,
+    pub panel: Retained<NSPanel>,
+    /// "Float on top" checkbox in the header.
+    pub float_checkbox: Retained<NSButton>,
+    /// Shared with the outside-click monitor: when true the floater stays open.
+    float_on_top: Rc<Cell<bool>>,
+    /// True until the floater has been placed once (first open goes under the icon).
+    needs_initial_placement: Cell<bool>,
     pub search_field: Retained<NSSearchField>,
     pub auto_paste_checkbox: Retained<NSButton>,
     pub launch_at_login_checkbox: Retained<NSButton>,
@@ -109,13 +130,18 @@ impl StatusItemController {
         }
 
         let built = build_popover(mtm);
-        info!("status item and popover created");
+        info!("status item and floater created");
 
-        // Close popover when the user clicks outside (status-item apps need this).
-        let popover_for_dismiss = built.popover.clone();
+        // A frame restored from autosave means the user has placed it before.
+        let restored = built.panel.frame().origin.x != 0.0 || built.panel.frame().origin.y != 0.0;
+        let float_on_top = Rc::new(Cell::new(true));
+
+        // Outside click closes the floater unless "Float on top" is on.
+        let panel_for_dismiss = built.panel.clone();
+        let float_for_dismiss = float_on_top.clone();
         let status_item_for_dismiss = status_item.clone();
         let dismiss_block = RcBlock::new(move |event: NonNull<NSEvent>| {
-            if !popover_for_dismiss.isShown() {
+            if !panel_for_dismiss.isVisible() || float_for_dismiss.get() {
                 return;
             }
             let Some(mtm) = MainThreadMarker::new() else {
@@ -141,18 +167,11 @@ impl StatusItemController {
                 }
             }
 
-            // Keep open if click is inside the popover window.
-            if let Some(content) = popover_for_dismiss.contentViewController() {
-                if let Some(view) = Some(content.view()) {
-                    if let Some(pwin) = view.window() {
-                        if rect_contains_point(pwin.frame(), screen_pt) {
-                            return;
-                        }
-                    }
-                }
+            if rect_contains_point(panel_for_dismiss.frame(), screen_pt) {
+                return;
             }
-
-            popover_for_dismiss.close();
+            info!("floater close via outside click");
+            panel_for_dismiss.orderOut(None);
         });
 
         let dismiss_monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
@@ -162,7 +181,10 @@ impl StatusItemController {
 
         Self {
             status_item,
-            popover: built.popover,
+            panel: built.panel,
+            float_checkbox: built.float_checkbox,
+            float_on_top,
+            needs_initial_placement: Cell::new(!restored),
             search_field: built.search_field,
             auto_paste_checkbox: built.auto_paste_checkbox,
             launch_at_login_checkbox: built.launch_at_login_checkbox,
@@ -224,6 +246,9 @@ impl StatusItemController {
 
             self.gear_button.setTarget(Some(target));
             self.gear_button.setAction(Some(sel!(toggleSettings:)));
+
+            self.float_checkbox.setTarget(Some(target));
+            self.float_checkbox.setAction(Some(sel!(toggleFloat:)));
 
             self.select_button.setTarget(Some(target));
             self.select_button.setAction(Some(sel!(toggleSelectMode:)));
@@ -345,6 +370,7 @@ impl StatusItemController {
     pub fn apply_settings_ui(&self, settings: &Settings) {
         self.set_auto_paste_checked(settings.auto_paste);
         self.set_launch_at_login_checked(settings.launch_at_login);
+        self.set_float_on_top(settings.float_panel);
         self.poll_popup
             .selectItemAtIndex(settings.poll_interval_index() as isize);
         self.retention_popup
@@ -355,6 +381,44 @@ impl StatusItemController {
             .selectItemAtIndex(settings.hotkey.index() as isize);
         self.hotkey_hint
             .setStringValue(&NSString::from_str(settings.hotkey.display()));
+    }
+
+    /// Apply "Float on top": window level and whether outside clicks close it.
+    pub fn set_float_on_top(&self, on: bool) {
+        self.float_on_top.set(on);
+        self.panel
+            .setLevel(if on { NSFloatingWindowLevel } else { NSNormalWindowLevel });
+        self.float_checkbox.setState(if on {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+    }
+
+    pub fn is_float_checked(&self) -> bool {
+        self.float_checkbox.state() == NSControlStateValueOn
+    }
+
+    pub fn float_on_top(&self) -> bool {
+        self.float_on_top.get()
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self.panel.isVisible()
+    }
+
+    pub fn close(&self) {
+        self.panel.orderOut(None);
+    }
+
+    /// Give keyboard focus back to the app underneath without hiding the
+    /// floater: ordering a key non-activating panel out and straight back in
+    /// returns key status to the active app's window.
+    pub fn release_focus(&self) {
+        if self.panel.isKeyWindow() {
+            self.panel.orderOut(None);
+            self.panel.orderFrontRegardless();
+        }
     }
 
     pub fn set_auto_paste_checked(&self, checked: bool) {
@@ -439,31 +503,31 @@ impl StatusItemController {
         }
     }
 
+    /// Show or hide the floater. Showing makes it key (search + arrow keys)
+    /// without activating this app.
     pub fn toggle_popover(&self, mtm: MainThreadMarker) {
-        if self.popover.isShown() {
-            self.popover.close();
+        if self.panel.isVisible() {
+            self.panel.orderOut(None);
             return;
         }
 
-        let Some(button) = self.status_item.button(mtm) else {
-            return;
-        };
+        if self.needs_initial_placement.replace(false) {
+            // First open ever: hang it just below the menu-bar icon.
+            if let Some(button) = self.status_item.button(mtm) {
+                if let Some(win) = button.window() {
+                    let r = win.convertRectToScreen(button.convertRect_toView(button.bounds(), None));
+                    let w = self.panel.frame().size.width;
+                    self.panel
+                        .setFrameTopLeftPoint(NSPoint::new((r.origin.x + r.size.width / 2.0 - w / 2.0).max(8.0), r.origin.y - 6.0));
+                }
+            }
+        }
 
-        // Activate so the popover becomes key and Transient dismiss works more reliably.
-        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
-
-        self.popover.showRelativeToRect_ofView_preferredEdge(
-            button.bounds(),
-            &button,
-            NSRectEdge::MaxY,
-        );
+        self.panel.orderFrontRegardless();
+        self.panel.makeKeyWindow();
 
         if !self.settings_visible.get() {
-            if let Some(window) = self.search_field.window() {
-                let _ = window.makeFirstResponder(Some(&self.search_field));
-            }
+            let _ = self.panel.makeFirstResponder(Some(&self.search_field));
         }
     }
 
@@ -504,7 +568,8 @@ impl StatusItemController {
         }
         self.refresh_toolbar_mode();
 
-        let content_w = POPOVER_WIDTH - PAD * 2.0;
+        let list_w = self.scroll_view.contentView().bounds().size.width.max(MIN_W - 20.0);
+        let content_w = list_w - PAD * 2.0;
         let clip_h = self.scroll_view.contentView().bounds().size.height;
 
         if items.is_empty() {
@@ -520,7 +585,7 @@ impl StatusItemController {
             }
             let doc_h = clip_h.max(120.0);
             self.list_document
-                .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(POPOVER_WIDTH, doc_h)));
+                .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(list_w, doc_h)));
             self.empty_label.setFrame(NSRect::new(
                 NSPoint::new(PAD, doc_h / 2.0 - 24.0),
                 NSSize::new(content_w, 48.0),
@@ -561,7 +626,7 @@ impl StatusItemController {
         content_h += 4.0;
         let doc_h = content_h.max(clip_h);
         self.list_document
-            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(POPOVER_WIDTH, doc_h)));
+            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(list_w, doc_h)));
 
         // Lay out from the top of the document (y grows upward in AppKit).
         let mut y = doc_h - 4.0;
@@ -642,7 +707,8 @@ impl StatusItemController {
 }
 
 struct PopoverParts {
-    popover: Retained<NSPopover>,
+    panel: Retained<NSPanel>,
+    float_checkbox: Retained<NSButton>,
     search_field: Retained<NSSearchField>,
     auto_paste_checkbox: Retained<NSButton>,
     launch_at_login_checkbox: Retained<NSButton>,
@@ -671,21 +737,46 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSSize::new(POPOVER_WIDTH, POPOVER_HEIGHT),
     ));
     root.setWantsLayer(true);
+    root.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
 
-    let header_y = POPOVER_HEIGHT - HEADER_H - 6.0;
+    // Resize rules: header pinned top, right-side controls pinned right,
+    // the list and search stretch.
+    let top = NSAutoresizingMaskOptions::ViewMinYMargin;
+    let top_right = NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewMinXMargin;
+    let top_wide = NSAutoresizingMaskOptions::ViewMinYMargin | NSAutoresizingMaskOptions::ViewWidthSizable;
+    let fill = NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable;
+
+    // Leave room for the (transparent) title bar strip used for dragging.
+    let header_y = POPOVER_HEIGHT - HEADER_H - 14.0;
 
     // Wordmark — medium weight, primary label (not heavy bold).
     let header = NSTextField::labelWithString(ns_string!("Clip Assistant"), mtm);
     header.setFrame(NSRect::new(
         NSPoint::new(PAD, header_y),
-        NSSize::new(150.0, HEADER_H - 6.0),
+        NSSize::new(140.0, HEADER_H - 6.0),
     ));
+    header.setAutoresizingMask(top);
     header.setFont(Some(unsafe { NSFont::systemFontOfSize_weight(13.0, NSFontWeightSemibold) }.as_ref()));
     header.setTextColor(Some(&NSColor::labelColor()));
     root.addSubview(&header);
 
     // Hotkey chip (quiet monospaced digits — signature of macOS utilities).
-    let hotkey_hint = NSTextField::labelWithString(ns_string!("⌘⇧V"), mtm);
+    // "Float on top": keep the floater above other windows and open after a paste.
+    let float_checkbox = unsafe {
+        NSButton::checkboxWithTitle_target_action(ns_string!("Float on top"), None, None, mtm)
+    };
+    float_checkbox.setFrame(NSRect::new(
+        NSPoint::new(POPOVER_WIDTH - PAD - 92.0 - 100.0, header_y + 1.0),
+        NSSize::new(98.0, 18.0),
+    ));
+    float_checkbox.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    float_checkbox.setToolTip(Some(ns_string!(
+        "On: stays above other windows and open after a paste. Off: closes on paste or an outside click."
+    )));
+    float_checkbox.setAutoresizingMask(top_right);
+    root.addSubview(&float_checkbox);
+
+    let hotkey_hint = NSTextField::labelWithString(ns_string!("⌃⌘V"), mtm);
     hotkey_hint.setFrame(NSRect::new(
         NSPoint::new(POPOVER_WIDTH - PAD - 92.0, header_y + 2.0),
         NSSize::new(52.0, 16.0),
@@ -694,6 +785,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     hotkey_hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
     hotkey_hint.setAlignment(NSTextAlignment::Right);
     hotkey_hint.setToolTip(Some(ns_string!("Global hotkey")));
+    hotkey_hint.setAutoresizingMask(top_right);
     root.addSubview(&hotkey_hint);
 
     // Gear — borderless SF Symbol, secondary tint.
@@ -709,10 +801,12 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSSize::new(26.0, 22.0),
     ));
     gear_button.setToolTip(Some(ns_string!("Settings")));
+    gear_button.setAutoresizingMask(top_right);
     root.addSubview(&gear_button);
 
     // Hairline under header.
     let header_sep = hairline(mtm, PAD, header_y - 6.0, POPOVER_WIDTH - PAD * 2.0);
+    header_sep.setAutoresizingMask(top_wide);
     root.addSubview(&header_sep);
 
     // --- History container ---
@@ -722,6 +816,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSPoint::new(0.0, STATUS_H),
         NSSize::new(POPOVER_WIDTH, history_top - STATUS_H),
     ));
+    history_container.setAutoresizingMask(fill);
 
     let search_field = NSSearchField::new(mtm);
     search_field.setFrame(NSRect::new(
@@ -729,6 +824,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSSize::new(POPOVER_WIDTH - PAD * 2.0, SEARCH_H),
     ));
     search_field.setPlaceholderString(Some(ns_string!("Search")));
+    search_field.setAutoresizingMask(top_wide);
     history_container.addSubview(&search_field);
 
     // Toolbar: quiet secondary actions — [Auto-paste] …… [Select] [Clear]
@@ -742,6 +838,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSSize::new(108.0, TOOLBAR_H),
     ));
     auto_paste_checkbox.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+    auto_paste_checkbox.setAutoresizingMask(top);
     auto_paste_checkbox.setToolTip(Some(ns_string!(
         "After copying an item, simulate ⌘V into the frontmost app."
     )));
@@ -756,6 +853,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     clear_history_button.setToolTip(Some(ns_string!(
         "Clear unpinned history (pinned items are kept)"
     )));
+    clear_history_button.setAutoresizingMask(top_right);
     history_container.addSubview(&clear_history_button);
 
     let select_button = make_toolbar_text_button(
@@ -768,6 +866,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         false,
     );
     select_button.setToolTip(Some(ns_string!("Select multiple items to delete")));
+    select_button.setAutoresizingMask(top_right);
     history_container.addSubview(&select_button);
 
     let delete_selected_button = make_toolbar_text_button(
@@ -782,12 +881,14 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     delete_selected_button.setToolTip(Some(ns_string!("Delete selected items")));
     delete_selected_button.setHidden(true);
     delete_selected_button.setEnabled(false);
+    delete_selected_button.setAutoresizingMask(top_right);
     history_container.addSubview(&delete_selected_button);
 
     let cancel_select_button =
         make_toolbar_text_button(mtm, "Cancel", right - btn_w, toolbar_y, btn_w, btn_h, false);
     cancel_select_button.setToolTip(Some(ns_string!("Exit selection mode")));
     cancel_select_button.setHidden(true);
+    cancel_select_button.setAutoresizingMask(top_right);
     history_container.addSubview(&cancel_select_button);
 
     let list_top = SEARCH_H + TOOLBAR_H + 18.0;
@@ -802,6 +903,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     scroll.setDrawsBackground(false);
     scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
     scroll.setAutohidesScrollers(true);
+    scroll.setAutoresizingMask(fill);
 
     let list_document = NSView::new(mtm);
     list_document.setFrame(NSRect::new(
@@ -825,6 +927,10 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
 
     // --- Settings panel ---
     let settings_panel = build_settings_panel(mtm);
+    settings_panel.setAutoresizingMask(fill);
+    for v in settings_panel.subviews().iter() {
+        v.setAutoresizingMask(top);
+    }
     settings_panel.setHidden(true);
     root.addSubview(&settings_panel);
 
@@ -839,16 +945,52 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     status_label.setMaximumNumberOfLines(1);
     status_label.setPreferredMaxLayoutWidth(POPOVER_WIDTH - PAD * 2.0);
     status_label.setHidden(true);
+    status_label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
     root.addSubview(&status_label);
 
-    let vc = NSViewController::new(mtm);
-    vc.setView(&root);
+    // Translucent background (menu-bar material) behind everything.
+    let effect = NSVisualEffectView::new(mtm);
+    effect.setFrame(root.frame());
+    effect.setMaterial(NSVisualEffectMaterial::Popover);
+    effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    effect.setState(NSVisualEffectState::Active);
+    effect.setAutoresizingMask(fill);
+    effect.addSubview(&root);
 
-    let popover = NSPopover::new(mtm);
-    popover.setBehavior(NSPopoverBehavior::Transient);
-    popover.setAnimates(true);
-    popover.setContentSize(NSSize::new(POPOVER_WIDTH, POPOVER_HEIGHT));
-    popover.setContentViewController(Some(&vc));
+    let style = NSWindowStyleMask::Titled
+        | NSWindowStyleMask::Resizable
+        | NSWindowStyleMask::FullSizeContentView
+        | NSWindowStyleMask::NonactivatingPanel
+        | NSWindowStyleMask::UtilityWindow;
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(POPOVER_WIDTH, POPOVER_HEIGHT)),
+        style,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    // SAFETY: we keep a strong reference for the life of the app.
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    panel.setTitlebarAppearsTransparent(true);
+    for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+        if let Some(btn) = panel.standardWindowButton(b) {
+            btn.setHidden(true);
+        }
+    }
+    panel.setMovableByWindowBackground(true);
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHidesOnDeactivate(false);
+    panel.setFloatingPanel(true);
+    panel.setLevel(NSFloatingWindowLevel);
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary,
+    );
+    panel.setMinSize(NSSize::new(MIN_W, MIN_H));
+    panel.setContentView(Some(&effect));
+    // Restores the last size/position if one was saved.
+    let _ = panel.setFrameAutosaveName(&NSString::from_str(FRAME_AUTOSAVE));
 
     // Extract settings controls (retained on panel as subviews; also keep named refs)
     let (
@@ -860,7 +1002,8 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     ) = extract_settings_controls(&settings_panel);
 
     PopoverParts {
-        popover,
+        panel,
+        float_checkbox,
         search_field,
         auto_paste_checkbox,
         launch_at_login_checkbox,

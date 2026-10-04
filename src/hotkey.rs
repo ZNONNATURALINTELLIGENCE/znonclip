@@ -6,8 +6,12 @@
 //! keyboard on a fresh install. The hotkey is consumed: the frontmost app does
 //! not also receive it.
 //!
+//! **⌃⌘U** (unlock / pin mode) and **⌃⌘L** (lock) are registered the same way,
+//! but only while the floater is visible, so they never shadow other apps'
+//! shortcuts while it is hidden.
+//!
 //! A separate `NSEvent` *local* monitor (no permission needed either) handles
-//! ↑ / ↓ / Enter / Esc while our popover has focus.
+//! ↑ / ↓ / Enter / Esc while the floater has keyboard focus.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -66,7 +70,28 @@ unsafe extern "C" {
         out_ref: *mut EventHotKeyRef,
     ) -> OSStatus;
     fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OSStatus;
+    fn GetEventParameter(
+        event: EventRef,
+        name: u32,
+        desired_type: u32,
+        out_actual_type: *mut u32,
+        buffer_size: usize,
+        out_actual_size: *mut usize,
+        out_data: *mut c_void,
+    ) -> OSStatus;
 }
+
+/// `kEventParamDirectObject` ('----') and `typeEventHotKeyID` ('hkid').
+const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
+
+/// Hotkey ids (our signature + id identify which combination fired).
+const ID_TOGGLE: u32 = 1;
+const ID_UNLOCK: u32 = 2;
+const ID_LOCK: u32 = 3;
+/// `kVK_ANSI_U`, `kVK_ANSI_L`.
+const KEYCODE_U: u32 = 0x20;
+const KEYCODE_L: u32 = 0x25;
 
 /// `kEventClassKeyboard` ('keyb').
 const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
@@ -83,13 +108,73 @@ const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"CLAS");
 /// The Carbon handler is installed once per process.
 static HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn hotkey_pressed(_: EventHandlerCallRef, _: EventRef, _: *mut c_void) -> OSStatus {
-    dispatch_hotkey_to_delegate();
+extern "C" fn hotkey_pressed(_: EventHandlerCallRef, event: EventRef, _: *mut c_void) -> OSStatus {
+    let mut id = EventHotKeyID { signature: 0, id: 0 };
+    // SAFETY: event is the Carbon event being dispatched; out buffer is sized for the type.
+    let status = unsafe {
+        GetEventParameter(
+            event,
+            K_EVENT_PARAM_DIRECT_OBJECT,
+            TYPE_EVENT_HOT_KEY_ID,
+            std::ptr::null_mut(),
+            std::mem::size_of::<EventHotKeyID>(),
+            std::ptr::null_mut(),
+            (&mut id as *mut EventHotKeyID).cast(),
+        )
+    };
+    if status != 0 || id.signature != HOTKEY_SIGNATURE {
+        return 0;
+    }
+    match id.id {
+        ID_TOGGLE => dispatch_hotkey_to_delegate(),
+        ID_UNLOCK => dispatch_pin_mode_to_delegate(true),
+        ID_LOCK => dispatch_pin_mode_to_delegate(false),
+        _ => {}
+    }
     0 // noErr
+}
+
+/// Register one Carbon hotkey. Returns null (and logs) on failure.
+fn register_carbon(key_code: u32, modifiers: u32, id: u32, label: &str) -> EventHotKeyRef {
+    let mut out: EventHotKeyRef = std::ptr::null_mut();
+    // SAFETY: valid out-pointer; target is the application event target.
+    let status = unsafe {
+        RegisterEventHotKey(
+            key_code,
+            modifiers,
+            EventHotKeyID {
+                signature: HOTKEY_SIGNATURE,
+                id,
+            },
+            GetApplicationEventTarget(),
+            0,
+            &mut out,
+        )
+    };
+    if status == 0 {
+        info!("hotkey registered: {label} (Carbon, no permission needed)");
+        out
+    } else {
+        // -9878 = eventHotKeyExistsErr: another app owns this combination.
+        warn!(
+            "RegisterEventHotKey {label} failed: OSStatus {status}{}",
+            if status == -9878 { " (combination taken by another app)" } else { "" }
+        );
+        std::ptr::null_mut()
+    }
+}
+
+fn unregister_carbon(r: &mut EventHotKeyRef) {
+    if !r.is_null() {
+        // SAFETY: ref came from RegisterEventHotKey and is unregistered once.
+        unsafe { UnregisterEventHotKey(*r) };
+        *r = std::ptr::null_mut();
+    }
 }
 
 fn carbon_modifiers(preset: HotkeyPreset) -> u32 {
     match preset {
+        HotkeyPreset::CtrlCmdV => CONTROL_KEY | CMD_KEY,
         HotkeyPreset::CmdShiftV | HotkeyPreset::CmdShiftC => CMD_KEY | SHIFT_KEY,
         HotkeyPreset::CmdOptionV => CMD_KEY | OPTION_KEY,
         HotkeyPreset::CtrlShiftV => CONTROL_KEY | SHIFT_KEY,
@@ -101,6 +186,8 @@ fn carbon_modifiers(preset: HotkeyPreset) -> u32 {
 /// Owns the Carbon hotkey registration and the popover-key local monitor.
 pub struct HotkeyManager {
     hot_key: EventHotKeyRef,
+    unlock_key: EventHotKeyRef,
+    lock_key: EventHotKeyRef,
     local_monitor: Option<Retained<AnyObject>>,
     _local_block: Option<RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent>>,
 }
@@ -130,32 +217,12 @@ impl HotkeyManager {
             }
         }
 
-        let mut hot_key: EventHotKeyRef = std::ptr::null_mut();
-        // SAFETY: valid out-pointer; target is the application event target.
-        let status = unsafe {
-            RegisterEventHotKey(
-                preset.key_code() as u32,
-                carbon_modifiers(preset),
-                EventHotKeyID {
-                    signature: HOTKEY_SIGNATURE,
-                    id: 1,
-                },
-                GetApplicationEventTarget(),
-                0,
-                &mut hot_key,
-            )
-        };
-        if status == 0 {
-            info!("global hotkey registered: {} (Carbon, no permission needed)", preset.display());
-        } else {
-            // -9878 = eventHotKeyExistsErr: another app owns this combination.
-            warn!(
-                "RegisterEventHotKey {} failed: OSStatus {status}{}",
-                preset.display(),
-                if status == -9878 { " (combination taken by another app)" } else { "" }
-            );
-            hot_key = std::ptr::null_mut();
-        }
+        let hot_key = register_carbon(
+            preset.key_code() as u32,
+            carbon_modifiers(preset),
+            ID_TOGGLE,
+            preset.display(),
+        );
 
         let local_block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
             let event_ref = unsafe { event.as_ref() };
@@ -176,8 +243,25 @@ impl HotkeyManager {
 
         Self {
             hot_key,
+            unlock_key: std::ptr::null_mut(),
+            lock_key: std::ptr::null_mut(),
             local_monitor,
             _local_block: Some(local_block),
+        }
+    }
+
+    /// Register ⌃⌘U / ⌃⌘L while the floater is visible; release them when hidden.
+    pub fn set_pin_keys_active(&mut self, active: bool) {
+        if active {
+            if self.unlock_key.is_null() {
+                self.unlock_key = register_carbon(KEYCODE_U, CONTROL_KEY | CMD_KEY, ID_UNLOCK, "⌃⌘U");
+            }
+            if self.lock_key.is_null() {
+                self.lock_key = register_carbon(KEYCODE_L, CONTROL_KEY | CMD_KEY, ID_LOCK, "⌃⌘L");
+            }
+        } else {
+            unregister_carbon(&mut self.unlock_key);
+            unregister_carbon(&mut self.lock_key);
         }
     }
 
@@ -190,11 +274,9 @@ impl HotkeyManager {
 
 impl Drop for HotkeyManager {
     fn drop(&mut self) {
-        if !self.hot_key.is_null() {
-            // SAFETY: ref came from RegisterEventHotKey and is unregistered once.
-            unsafe { UnregisterEventHotKey(self.hot_key) };
-            self.hot_key = std::ptr::null_mut();
-        }
+        unregister_carbon(&mut self.hot_key);
+        unregister_carbon(&mut self.unlock_key);
+        unregister_carbon(&mut self.lock_key);
         if let Some(ref mon) = self.local_monitor.take() {
             unsafe { NSEvent::removeMonitor(mon) };
         }
@@ -232,6 +314,18 @@ fn dispatch_nav_key_to_delegate(code: u16) -> bool {
     };
     // SAFETY: ClipAssistantAppDelegate implements popoverNavKey: (NSInteger) -> BOOL.
     unsafe { msg_send![&*delegate, popoverNavKey: code as isize] }
+}
+
+fn dispatch_pin_mode_to_delegate(unlock: bool) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(delegate) = app.delegate() else {
+        return;
+    };
+    // SAFETY: ClipAssistantAppDelegate implements hotkeyPinMode: (NSInteger).
+    let _: () = unsafe { msg_send![&*delegate, hotkeyPinMode: unlock as isize] };
 }
 
 fn dispatch_hotkey_to_delegate() {
