@@ -15,11 +15,15 @@ mod clipboard;
 mod hotkey;
 mod instance;
 mod launch;
+mod mouse_trigger;
 mod predict;
+mod preview;
 mod privacy;
+mod row;
 mod settings;
 mod status_item;
 mod storage;
+mod theme;
 
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -54,8 +58,11 @@ fn main() {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Snapshot mode renders PNGs and exits; it may run beside the live app.
+    let snapshot = env::var_os(app::SNAPSHOT_ENV).is_some();
+
     // One instance only: a second launch (terminal, --detach, login agent) exits here.
-    let _instance_lock = match instance::acquire() {
+    let _instance_lock = if snapshot { None } else { match instance::acquire() {
         instance::Acquire::Acquired(f) => Some(f),
         instance::Acquire::AlreadyRunning => {
             info!("another ZnonClip instance is running — exiting");
@@ -66,7 +73,7 @@ fn main() {
             log::warn!("single-instance lock unavailable ({e}); continuing");
             None
         }
-    };
+    } };
 
     if env::var_os(launch::AUTOSTART_ENV).is_some() {
         info!("ZnonClip starting (launchd autostart — no Terminal)");
@@ -101,6 +108,9 @@ EXAMPLES:
     {name}           Foreground (logs in this terminal)
     {name} -d        Detached / independent process
     {name} --detach
+
+Visual check without Screen Recording permission:
+    ZNONCLIP_SNAPSHOT=<dir> {name}   renders the floater and previews to PNG, then exits
 
 Detached logs: ~/Library/Logs/ZnonClip/znonclip.log
 Stop:          pkill -x znonclip

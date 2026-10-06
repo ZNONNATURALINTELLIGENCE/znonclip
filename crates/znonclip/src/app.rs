@@ -11,7 +11,7 @@ use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSEventType, NSRunningApplication, NSSearchField, NSStatusItem,
+    NSApplicationDelegate, NSEvent, NSEventType, NSRunningApplication, NSSearchField, NSStatusItem,
     NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSTimer};
@@ -23,11 +23,16 @@ use crate::clipboard::{
 };
 use crate::hotkey::{self, HotkeyManager};
 use crate::launch;
+use crate::mouse_trigger::{self, MouseTrigger};
+use crate::preview;
 use crate::predict::{self, HeuristicRanker, PasteContext, Ranker};
 use crate::privacy;
 use crate::settings::{Settings, MAX_PINNED};
-use crate::status_item::{sender_item_id, StatusItemController};
+use crate::status_item::{sender_item_id, Flash, StatusItemController};
 use crate::storage::{Storage, DEFAULT_CACHE_LIMIT};
+
+/// Set to a directory to render the floater and previews to PNG and exit.
+pub const SNAPSHOT_ENV: &str = "ZNONCLIP_SNAPSHOT";
 
 /// Delay before posting ⌘V so the previous app can regain focus after popover close.
 const AUTO_PASTE_DELAY_SECS: f64 = 0.15;
@@ -51,6 +56,8 @@ pub struct AppDelegateIvars {
     clipboard_hash: RefCell<Option<String>>,
     /// Advisory ranker for the pre-highlighted row.
     ranker: HeuristicRanker,
+    /// Option + right-click anywhere opens the floater (keeps monitors alive).
+    mouse_trigger: RefCell<Option<MouseTrigger>>,
     _status_item_keepalive: Cell<Option<Retained<NSStatusItem>>>,
 }
 
@@ -68,6 +75,7 @@ impl Default for AppDelegateIvars {
             target_app: RefCell::new(None),
             clipboard_hash: RefCell::new(None),
             ranker: HeuristicRanker::default(),
+            mouse_trigger: RefCell::new(None),
             _status_item_keepalive: Cell::new(None),
         }
     }
@@ -163,8 +171,15 @@ define_class!(
 
             *self.ivars().status.borrow_mut() = Some(controller);
 
+            if let Some(dir) = std::env::var_os(SNAPSHOT_ENV) {
+                self.write_snapshots(std::path::Path::new(&dir));
+                std::process::exit(0);
+            }
+
             let hotkey = self.ivars().settings.borrow().hotkey;
             *self.ivars().hotkey.borrow_mut() = Some(HotkeyManager::register(hotkey, mtm));
+
+            *self.ivars().mouse_trigger.borrow_mut() = Some(MouseTrigger::install(mtm));
 
             self.restart_poll_timer();
 
@@ -204,12 +219,29 @@ define_class!(
             if !status.is_shown() || status.is_select_mode() || status.settings_visible() {
                 return Bool::NO;
             }
+            // ⌘-chords on the highlighted row: ⌘P pin, ⌘E expand, ⌘⌫ delete.
+            if code & hotkey::CMD_CHORD != 0 {
+                let Some(id) = status.highlighted_id() else {
+                    return Bool::NO;
+                };
+                drop(status_ref);
+                match (code & !hotkey::CMD_CHORD) as u16 {
+                    hotkey::KEY_P => self.toggle_pin(id),
+                    hotkey::KEY_E => self.toggle_expand(id),
+                    hotkey::KEY_DELETE => self.delete_animated(id),
+                    _ => return Bool::NO,
+                }
+                return Bool::YES;
+            }
             match code as u16 {
                 hotkey::KEY_DOWN | hotkey::KEY_UP => {
                     let delta = if code as u16 == hotkey::KEY_DOWN { 1 } else { -1 };
-                    if status.move_highlight(delta).is_some() {
+                    if let Some(id) = status.move_highlight(delta) {
                         drop(status_ref);
                         self.reload_list(mtm, unsafe { &*target });
+                        if preview::is_expanded() {
+                            self.follow_expanded(id);
+                        }
                     }
                     Bool::YES
                 }
@@ -223,9 +255,13 @@ define_class!(
                     Bool::YES
                 }
                 hotkey::KEY_ESCAPE => {
-                    info!("floater close via Esc");
                     drop(status_ref);
-                    self.hide_floater();
+                    if preview::is_expanded() {
+                        preview::close();
+                    } else {
+                        info!("floater close via Esc");
+                        self.hide_floater();
+                    }
                     Bool::YES
                 }
                 _ => Bool::NO,
@@ -632,101 +668,111 @@ define_class!(
             }
         }
 
-        /// Context-menu Pin / Unpin.
-        // SAFETY: menu action.
+        /// Row Pin button, context-menu Pin / Unpin, or ⌘P.
+        // SAFETY: control/menu action.
         #[unsafe(method(pinHistoryItem:))]
         fn pin_history_item(&self, sender: Option<&AnyObject>) {
-            let mtm = self.mtm();
-            let target: *const AnyObject = (self as *const Self).cast();
-            let Some(id) = sender_item_id(sender) else {
-                return;
-            };
-
-            let currently_pinned = self
-                .ivars()
-                .history
-                .borrow()
-                .get(id)
-                .map(|i| i.is_pinned)
-                .or_else(|| {
-                    self.ivars()
-                        .storage
-                        .borrow()
-                        .as_ref()
-                        .and_then(|s| s.get_item(id).ok().flatten())
-                        .map(|i| i.is_pinned)
-                })
-                .unwrap_or(false);
-            let new_pin = !currently_pinned;
-
-            if new_pin {
-                let pinned = self
-                    .ivars()
-                    .storage
-                    .borrow()
-                    .as_ref()
-                    .and_then(|s| s.pinned_count().ok())
-                    .unwrap_or(0);
-                if pinned >= MAX_PINNED {
-                    if let Some(ref status) = *self.ivars().status.borrow() {
-                        status.set_status_notice(Some(&format!(
-                            "{MAX_PINNED} pins max: unpin one first"
-                        )));
-                    }
-                    info!("pin refused: {pinned} pinned (cap {MAX_PINNED})");
-                    return;
-                }
+            if let Some(id) = sender_item_id(sender) {
+                self.toggle_pin(id);
             }
-
-            if let Some(ref storage) = *self.ivars().storage.borrow() {
-                if let Err(e) = storage.set_pinned(id, new_pin) {
-                    error!("set_pinned failed: {e}");
-                    return;
-                }
-            }
-            self.ivars().history.borrow_mut().set_pinned(id, new_pin);
-
-            if let Some(ref storage) = *self.ivars().storage.borrow() {
-                if let Ok(items) = storage.recent_items(DEFAULT_CACHE_LIMIT) {
-                    self.ivars().history.borrow_mut().replace_all(items);
-                }
-            }
-
-            self.reload_list(mtm, unsafe { &*target });
-            if let Some(ref status) = *self.ivars().status.borrow() {
-                status.set_status_notice(Some(if new_pin {
-                    "Pinned"
-                } else {
-                    "Unpinned"
-                }));
-            }
-            info!("item id={id} pinned={new_pin}");
         }
 
-        /// Context-menu Delete.
-        // SAFETY: menu action.
+        /// Row Delete button or context-menu Delete: animate the row out first.
+        // SAFETY: menu/control action.
         #[unsafe(method(deleteHistoryItem:))]
         fn delete_history_item(&self, sender: Option<&AnyObject>) {
+            if let Some(id) = sender_item_id(sender) {
+                self.delete_animated(id);
+            }
+        }
+
+        /// Row Expand button or ⌘E: toggle the large preview.
+        // SAFETY: control/menu action.
+        #[unsafe(method(expandHistoryItem:))]
+        fn expand_history_item(&self, sender: Option<&AnyObject>) {
+            if let Some(id) = sender_item_id(sender) {
+                self.toggle_expand(id);
+            }
+        }
+
+        /// Close button on the expanded preview.
+        // SAFETY: control action.
+        #[unsafe(method(collapsePreview:))]
+        fn collapse_preview(&self, _sender: Option<&AnyObject>) {
+            preview::close();
+        }
+
+        /// Select mode: pin every selected row, or unpin them if all are pinned.
+        // SAFETY: control action.
+        #[unsafe(method(pinSelectedItems:))]
+        fn pin_selected_items(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
             let target: *const AnyObject = (self as *const Self).cast();
-            let Some(id) = sender_item_id(sender) else {
+            let ids = self
+                .ivars()
+                .status
+                .borrow()
+                .as_ref()
+                .map(|s| s.selected_ids())
+                .unwrap_or_default();
+            if ids.is_empty() {
                 return;
+            }
+            let all_pinned = {
+                let h = self.ivars().history.borrow();
+                ids.iter().all(|id| h.get(*id).is_some_and(|i| i.is_pinned))
             };
-
-            if let Some(ref storage) = *self.ivars().storage.borrow() {
-                match storage.delete_item(id) {
-                    Ok(true) => info!("deleted item id={id}"),
-                    Ok(false) => warn!("delete: no row id={id}"),
-                    Err(e) => {
-                        error!("delete failed: {e}");
-                        return;
-                    }
+            let want = !all_pinned;
+            let mut changed = 0usize;
+            let mut refused = 0usize;
+            for id in &ids {
+                if want && self.pinned_count() >= MAX_PINNED {
+                    refused += 1;
+                    continue;
+                }
+                if self.set_pin(*id, want) {
+                    changed += 1;
                 }
             }
-            self.ivars().history.borrow_mut().remove(id);
-            self.reload_list(mtm, unsafe { &*target });
+            self.reload_cache();
             if let Some(ref status) = *self.ivars().status.borrow() {
-                status.set_status_notice(Some("Deleted"));
+                status.set_select_mode(false);
+                let mut msg = format!("{} {changed}", if want { "Pinned" } else { "Unpinned" });
+                if refused > 0 {
+                    msg.push_str(&format!(" · {refused} over the {MAX_PINNED}-pin limit"));
+                }
+                status.set_status_notice(Some(&msg));
+            }
+            self.reload_list(mtm, unsafe { &*target });
+        }
+
+        /// Option + right-click anywhere: open (or move) the floater at the pointer.
+        // SAFETY: called by mouse_trigger with a nil sender.
+        #[unsafe(method(openFloaterAtCursor:))]
+        fn open_floater_at_cursor(&self, _sender: Option<&AnyObject>) {
+            let mtm = self.mtm();
+            let target: *const AnyObject = (self as *const Self).cast();
+            let point = NSEvent::mouseLocation();
+            let opening = self
+                .ivars()
+                .status
+                .borrow()
+                .as_ref()
+                .is_some_and(|s| !s.is_shown());
+            info!("floater {} via option+right-click", if opening { "open" } else { "move" });
+            if opening {
+                self.capture_target_app();
+                self.update_prediction();
+            }
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.show_history();
+                status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe { &*target });
+                status.open_at(mtm, point);
+            }
+            if opening {
+                if let Some(ref mut hk) = *self.ivars().hotkey.borrow_mut() {
+                    hk.set_pin_keys_active(true);
+                }
             }
         }
 
@@ -856,6 +902,192 @@ impl ZnonClipAppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// Pin or unpin `id` (respecting the pin cap), re-render, flash the row.
+    fn toggle_pin(&self, id: u64) {
+        let mtm = self.mtm();
+        let target: *const AnyObject = (self as *const Self).cast();
+        let currently_pinned = self
+            .ivars()
+            .history
+            .borrow()
+            .get(id)
+            .map(|i| i.is_pinned)
+            .or_else(|| {
+                self.ivars()
+                    .storage
+                    .borrow()
+                    .as_ref()
+                    .and_then(|s| s.get_item(id).ok().flatten())
+                    .map(|i| i.is_pinned)
+            })
+            .unwrap_or(false);
+        let new_pin = !currently_pinned;
+        if new_pin && self.pinned_count() >= MAX_PINNED {
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.set_status_notice(Some(&format!("{MAX_PINNED} pins max: unpin one first")));
+            }
+            info!("pin refused: cap {MAX_PINNED}");
+            return;
+        }
+        if !self.set_pin(id, new_pin) {
+            return;
+        }
+        self.reload_cache();
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.flash_next(id, if new_pin { Flash::Pinned } else { Flash::Unpinned });
+            status.set_status_notice(Some(if new_pin { "Pinned" } else { "Unpinned" }));
+        }
+        self.reload_list(mtm, unsafe { &*target });
+        info!("item id={id} pinned={new_pin}");
+    }
+
+    /// Write one pin state to storage and the cache. False if storage refused.
+    fn set_pin(&self, id: u64, pinned: bool) -> bool {
+        if let Some(ref storage) = *self.ivars().storage.borrow() {
+            if let Err(e) = storage.set_pinned(id, pinned) {
+                error!("set_pinned failed: {e}");
+                return false;
+            }
+        }
+        self.ivars().history.borrow_mut().set_pinned(id, pinned);
+        true
+    }
+
+    fn pinned_count(&self) -> usize {
+        self.ivars()
+            .storage
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.pinned_count().ok())
+            .unwrap_or_else(|| self.ivars().history.borrow().filter("").iter().filter(|i| i.is_pinned).count())
+    }
+
+    /// Refresh the in-memory cache from SQLite (pin order, pruning).
+    fn reload_cache(&self) {
+        if let Some(ref storage) = *self.ivars().storage.borrow() {
+            if let Ok(items) = storage.recent_items(DEFAULT_CACHE_LIMIT) {
+                self.ivars().history.borrow_mut().replace_all(items);
+            }
+        }
+    }
+
+    /// Slide the row out, then delete it. Rows not on screen go straight away.
+    fn delete_animated(&self, id: u64) {
+        let row = self.ivars().status.borrow().as_ref().and_then(|s| s.row_view(id));
+        match row {
+            Some(row) => {
+                // SAFETY: the delegate is leaked in run() and lives for the process.
+                let me = self as *const Self as usize;
+                row.animate_removal(Box::new(move || unsafe { &*(me as *const Self) }.commit_delete(id)));
+            }
+            None => self.commit_delete(id),
+        }
+    }
+
+    fn commit_delete(&self, id: u64) {
+        let mtm = self.mtm();
+        let target: *const AnyObject = (self as *const Self).cast();
+        if let Some(ref storage) = *self.ivars().storage.borrow() {
+            match storage.delete_item(id) {
+                Ok(true) => info!("deleted item id={id}"),
+                Ok(false) => warn!("delete: no row id={id}"),
+                Err(e) => {
+                    error!("delete failed: {e}");
+                    return;
+                }
+            }
+        }
+        self.ivars().history.borrow_mut().remove(id);
+        preview::close();
+        self.reload_list(mtm, unsafe { &*target });
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.set_status_notice(Some("Deleted"));
+        }
+    }
+
+    fn item_by_id(&self, id: u64) -> Option<crate::clipboard::ClipboardItem> {
+        self.ivars().history.borrow().get(id).cloned().or_else(|| {
+            self.ivars()
+                .storage
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.get_item(id).ok().flatten())
+        })
+    }
+
+    /// Anchor rect for a preview of `id`: its row if visible, else the floater.
+    fn preview_anchor(&self, id: u64) -> Option<(objc2_foundation::NSRect, objc2_foundation::NSRect)> {
+        let status = self.ivars().status.borrow();
+        let status = status.as_ref()?;
+        let floater = status.floater_frame();
+        let anchor = status.row_view(id).map(|r| r.screen_rect()).unwrap_or(floater);
+        Some((anchor, floater))
+    }
+
+    fn toggle_expand(&self, id: u64) {
+        let Some(item) = self.item_by_id(id) else {
+            return;
+        };
+        let Some((anchor, floater)) = self.preview_anchor(id) else {
+            return;
+        };
+        let target: *const AnyObject = (self as *const Self).cast();
+        preview::toggle_expanded(self.mtm(), &item, anchor, floater, unsafe { &*target });
+    }
+
+    fn follow_expanded(&self, id: u64) {
+        let (Some(item), Some((anchor, floater))) = (self.item_by_id(id), self.preview_anchor(id)) else {
+            return;
+        };
+        let target: *const AnyObject = (self as *const Self).cast();
+        preview::follow_if_expanded(self.mtm(), &item, anchor, floater, unsafe { &*target });
+    }
+
+    /// Headless visual check: floater (normal + select mode) and both preview
+    /// modes for one image and one text item.
+    fn write_snapshots(&self, dir: &std::path::Path) {
+        let mtm = self.mtm();
+        let target: *const AnyObject = (self as *const Self).cast();
+        let _ = std::fs::create_dir_all(dir);
+        let save = |view: &objc2_app_kit::NSView, name: &str| {
+            let path = dir.join(name);
+            match crate::theme::save_png(view, &path) {
+                Ok(()) => println!("wrote {}", path.display()),
+                Err(e) => eprintln!("snapshot {name} failed: {e}"),
+            }
+        };
+        let items = self.ivars().history.borrow().filter("");
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            if let Some(first) = items.iter().find(|i| i.is_pinned).or(items.first()) {
+                status.set_suggestion(Some((first.id, "pasted here before".into())));
+            }
+            status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe { &*target });
+            if let Some(content) = status.panel.contentView() {
+                save(&content, "floater.png");
+            }
+            status.set_select_mode(true);
+            for i in items.iter().take(2) {
+                status.toggle_selection(i.id);
+            }
+            status.refresh_toolbar_mode();
+            status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe { &*target });
+            if let Some(content) = status.panel.contentView() {
+                save(&content, "floater-select.png");
+            }
+        }
+        let image = items.iter().find(|i| i.content_type == crate::clipboard::ContentType::Image);
+        let text = items
+            .iter()
+            .filter(|i| i.content_text.is_some())
+            .max_by_key(|i| i.content_text.as_ref().map_or(0, |t| t.len()));
+        for (item, tag) in [(image, "image"), (text, "text")] {
+            if let Some(item) = item {
+                save(&preview::snapshot_view(mtm, item, false), &format!("preview-{tag}-hover.png"));
+                save(&preview::snapshot_view(mtm, item, true), &format!("preview-{tag}-expanded.png"));
+            }
+        }
+    }
+
     fn toggle_popover_impl(&self, via: &str) {
         let mtm = self.mtm();
         let target: *const AnyObject = (self as *const Self).cast();
@@ -867,6 +1099,7 @@ impl ZnonClipAppDelegate {
             .is_some_and(|s| !s.is_shown());
         info!("popover {} via {via}", if opening { "open" } else { "close" });
         if opening {
+            mouse_trigger::ensure_tap();
             self.capture_target_app();
             self.update_prediction();
         }
@@ -987,6 +1220,9 @@ impl ZnonClipAppDelegate {
             .is_some_and(|s| s.float_on_top());
         if float {
             if let Some(ref status) = *self.ivars().status.borrow() {
+                if let Some(row) = status.row_view(id) {
+                    crate::theme::flash(self.mtm(), &row, &crate::theme::neon(), 9.0);
+                }
                 status.release_focus();
             }
         } else {

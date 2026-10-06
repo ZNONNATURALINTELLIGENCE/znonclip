@@ -37,8 +37,9 @@ pub enum PollResult {
     Captured(ClipboardItem),
 }
 
-/// Maximum thumbnail edge length in pixels.
-const THUMB_MAX: f64 = 256.0;
+/// Maximum thumbnail edge length in pixels. 512 px is a sharp 256 pt preview
+/// on Retina; rows downscale it.
+const THUMB_MAX: f64 = 512.0;
 
 /// Refuse to decode sources larger than this many pixels (drawing decodes the
 /// full bitmap; a 20k×20k paste would otherwise cost ~1.6 GB transiently).
@@ -114,7 +115,7 @@ pub struct ClipboardItem {
     pub content_text: Option<String>,
     pub content_rtf: Option<Vec<u8>>,
     pub content_html: Option<String>,
-    /// JPEG/TIFF thumbnail bytes (max 256×256), never full-res originals.
+    /// JPEG/TIFF thumbnail bytes (max 512×512 px), never full-res originals.
     pub content_image: Option<Vec<u8>>,
     pub content_file_paths: Option<Vec<String>>,
     pub content_url: Option<String>,
@@ -726,7 +727,7 @@ fn thumb_pixel_dims(src: NSSize) -> (isize, isize) {
     (tw, th)
 }
 
-/// Resize to max 256×256 **pixels** and encode as JPEG when possible, else TIFF.
+/// Resize to max 512×512 **pixels** and encode as JPEG when possible, else TIFF.
 ///
 /// Renders into an explicit pixel-sized bitmap rather than `NSImage::lockFocus`,
 /// whose backing store follows the screen scale (512×512 on Retina).
@@ -847,18 +848,18 @@ mod thumb_tests {
     #[test]
     fn thumb_dims_are_pixel_bounded() {
         // 2x Retina full-screen capture (pixels, not points).
-        assert_eq!(thumb_pixel_dims(NSSize::new(5120.0, 2880.0)), (256, 144));
-        assert_eq!(thumb_pixel_dims(NSSize::new(1000.0, 4000.0)), (64, 256));
+        assert_eq!(thumb_pixel_dims(NSSize::new(5120.0, 2880.0)), (512, 288));
+        assert_eq!(thumb_pixel_dims(NSSize::new(1000.0, 4000.0)), (128, 512));
         // Never upscale small images.
         assert_eq!(thumb_pixel_dims(NSSize::new(40.0, 20.0)), (40, 20));
         // Degenerate slivers keep at least one pixel.
-        assert_eq!(thumb_pixel_dims(NSSize::new(100000.0, 1.0)), (256, 1));
+        assert_eq!(thumb_pixel_dims(NSSize::new(100000.0, 1.0)), (512, 1));
     }
 
     /// A 2x capture: 2560×1600 pixels tagged 144 DPI, so `NSImage::size` reports
     /// 1280×800 points. The thumbnail must be bounded in pixels, not points.
     #[test]
-    fn retina_capture_thumbnail_is_256px() {
+    fn retina_capture_thumbnail_is_512px() {
         let (pw, ph) = (2560isize, 1600isize);
         let src = unsafe {
             NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
@@ -886,6 +887,6 @@ mod thumb_tests {
 
         let thumb = make_thumbnail(&png).expect("thumbnail");
         let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&thumb)).unwrap();
-        assert_eq!((rep.pixelsWide(), rep.pixelsHigh()), (256, 160));
+        assert_eq!((rep.pixelsWide(), rep.pixelsHigh()), (512, 320));
     }
 }

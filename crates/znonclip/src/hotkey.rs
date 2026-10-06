@@ -228,8 +228,13 @@ impl HotkeyManager {
             let event_ref = unsafe { event.as_ref() };
             // Popover keyboard navigation (arrows / Enter / Esc), only when no
             // command-style modifier is held so ⌘A, ⌘C etc. keep working.
-            if is_nav_key(event_ref) && dispatch_nav_key_to_delegate(event_ref.keyCode()) {
+            if is_nav_key(event_ref) && dispatch_nav_key_to_delegate(event_ref.keyCode() as isize) {
                 return std::ptr::null_mut();
+            }
+            if let Some(code) = row_chord_code(event_ref) {
+                if dispatch_nav_key_to_delegate(code) {
+                    return std::ptr::null_mut();
+                }
             }
             event.as_ptr()
         });
@@ -291,6 +296,25 @@ pub const KEY_KEYPAD_ENTER: u16 = 76;
 pub const KEY_ESCAPE: u16 = 53;
 pub const KEY_DOWN: u16 = 125;
 pub const KEY_UP: u16 = 126;
+pub const KEY_P: u16 = 35;
+pub const KEY_E: u16 = 14;
+pub const KEY_DELETE: u16 = 51;
+/// Flag OR-ed into the code passed to `popoverNavKey:` for ⌘-chords.
+pub const CMD_CHORD: isize = 0x1_0000;
+
+/// ⌘P / ⌘E / ⌘⌫ with no other modifier: row actions on the highlighted item.
+fn row_chord_code(event: &NSEvent) -> Option<isize> {
+    let code = event.keyCode();
+    if !matches!(code, KEY_P | KEY_E | KEY_DELETE) {
+        return None;
+    }
+    let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
+    let only_cmd = flags.contains(NSEventModifierFlags::Command)
+        && !flags.intersects(
+            NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
+        );
+    only_cmd.then_some(code as isize | CMD_CHORD)
+}
 
 fn is_nav_key(event: &NSEvent) -> bool {
     let code = event.keyCode();
@@ -304,7 +328,7 @@ fn is_nav_key(event: &NSEvent) -> bool {
 }
 
 /// Ask the delegate to handle a navigation key. Returns true if it consumed it.
-fn dispatch_nav_key_to_delegate(code: u16) -> bool {
+fn dispatch_nav_key_to_delegate(code: isize) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
@@ -313,7 +337,7 @@ fn dispatch_nav_key_to_delegate(code: u16) -> bool {
         return false;
     };
     // SAFETY: ZnonClipAppDelegate implements popoverNavKey: (NSInteger) -> BOOL.
-    unsafe { msg_send![&*delegate, popoverNavKey: code as isize] }
+    unsafe { msg_send![&*delegate, popoverNavKey: code] }
 }
 
 fn dispatch_pin_mode_to_delegate(unlock: bool) {

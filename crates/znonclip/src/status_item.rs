@@ -19,21 +19,23 @@ use block2::RcBlock;
 use log::info;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{sel, AnyThread, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSBezelStyle, NSBox, NSBoxType, NSButton, NSCellImagePosition, NSColor, NSControl,
+    NSBox, NSBoxType, NSButton, NSColor, NSControl,
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventMask, NSFont,
-    NSFontWeightMedium, NSFontWeightRegular, NSFontWeightSemibold, NSImage, NSImageScaling,
-    NSImageSymbolConfiguration, NSImageSymbolScale, NSLineBreakMode, NSMenu, NSMenuItem,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSFloatingWindowLevel, NSNormalWindowLevel,
+    NSFontWeightMedium, NSFontWeightRegular, NSImage, 
+    NSMenuItem,
+    NSAnimatablePropertyContainer, NSAppearanceCustomization, NSAutoresizingMaskOptions, NSBackingStoreType, NSScreen, NSFloatingWindowLevel, NSNormalWindowLevel,
     NSPanel, NSPopUpButton, NSScrollView, NSSearchField, NSStatusBar, NSStatusItem,
     NSTextAlignment, NSTextField, NSTitlePosition, NSVariableStatusItemLength, NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{ns_string, NSData, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
 
-use crate::clipboard::{ClipboardItem, ContentType, History};
+use crate::clipboard::{ClipboardItem, History};
+use crate::row::{self, RowView};
+use crate::theme;
 use crate::settings::{
     history_limit_label, poll_label, retention_label, HotkeyPreset, Settings,
     DEFAULT_HISTORY_ITEMS, HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
@@ -41,10 +43,10 @@ use crate::settings::{
 
 /// Initial floater content size (points). The user can resize it; the size and
 /// position are remembered (frame autosave).
-pub const POPOVER_WIDTH: f64 = 380.0;
-pub const POPOVER_HEIGHT: f64 = 500.0;
+pub const POPOVER_WIDTH: f64 = 430.0;
+pub const POPOVER_HEIGHT: f64 = 560.0;
 /// Smallest floater the layout supports.
-const MIN_W: f64 = 320.0;
+const MIN_W: f64 = 360.0;
 const MIN_H: f64 = 260.0;
 /// Frame autosave key (NSUserDefaults).
 const FRAME_AUTOSAVE: &str = "ZnonClipFloater";
@@ -54,12 +56,16 @@ const SEARCH_H: f64 = 28.0;
 const TOOLBAR_H: f64 = 22.0;
 const STATUS_H: f64 = 20.0;
 const PAD: f64 = 12.0;
-const ROW_H: f64 = 32.0;
 const SECTION_H: f64 = 18.0;
 const SEP_H: f64 = 1.0;
-const ROW_GAP: f64 = 2.0;
-const ROW_RADIUS: f64 = 6.0;
-const TIME_COL: f64 = 44.0;
+const ROW_GAP: f64 = 3.0;
+
+/// Feedback flash after an action lands on a row.
+#[derive(Clone, Copy)]
+pub enum Flash {
+    Pinned,
+    Unpinned,
+}
 
 /// Owns strong refs for the menu-bar UI (must not drop while app runs).
 pub struct StatusItemController {
@@ -94,6 +100,10 @@ pub struct StatusItemController {
     pub delete_selected_button: Retained<NSButton>,
     pub clear_history_button: Retained<NSButton>,
     pub cancel_select_button: Retained<NSButton>,
+    /// Select mode: pin / unpin every selected row.
+    pub pin_selected_button: Retained<NSButton>,
+    /// Row to flash on the next render, and how.
+    flash: Cell<Option<(u64, Flash)>>,
     settings_visible: Cell<bool>,
     /// Multi-select mode for bulk delete.
     select_mode: Cell<bool>,
@@ -171,6 +181,7 @@ impl StatusItemController {
                 return;
             }
             info!("floater close via outside click");
+            crate::preview::close();
             panel_for_dismiss.orderOut(None);
         });
 
@@ -204,6 +215,8 @@ impl StatusItemController {
             delete_selected_button: built.delete_selected_button,
             clear_history_button: built.clear_history_button,
             cancel_select_button: built.cancel_select_button,
+            pin_selected_button: built.pin_selected_button,
+            flash: Cell::new(None),
             settings_visible: Cell::new(false),
             select_mode: Cell::new(false),
             selected_ids: RefCell::new(HashSet::new()),
@@ -264,6 +277,10 @@ impl StatusItemController {
             self.cancel_select_button.setTarget(Some(target));
             self.cancel_select_button
                 .setAction(Some(sel!(cancelSelectMode:)));
+
+            self.pin_selected_button.setTarget(Some(target));
+            self.pin_selected_button
+                .setAction(Some(sel!(pinSelectedItems:)));
         }
         self.refresh_toolbar_mode();
     }
@@ -353,6 +370,8 @@ impl StatusItemController {
 
         self.delete_selected_button.setHidden(!select);
         self.cancel_select_button.setHidden(!select);
+        self.pin_selected_button.setHidden(!select);
+        self.pin_selected_button.setEnabled(n > 0);
 
         if select {
             let label = if n == 0 {
@@ -408,7 +427,27 @@ impl StatusItemController {
     }
 
     pub fn close(&self) {
+        crate::preview::close();
         self.panel.orderOut(None);
+    }
+
+    /// Flash row `id` on the next render (action feedback).
+    pub fn flash_next(&self, id: u64, kind: Flash) {
+        self.flash.set(Some((id, kind)));
+    }
+
+    /// The live row view for `id`, if it is on screen.
+    pub fn row_view(&self, id: u64) -> Option<Retained<RowView>> {
+        self.list_document.subviews().iter().find_map(|v| {
+            v.downcast_ref::<RowView>()
+                .filter(|r| r.item_id() == id)
+                .map(|r| r.retain())
+        })
+    }
+
+    /// Floater frame in screen coordinates.
+    pub fn floater_frame(&self) -> NSRect {
+        self.panel.frame()
     }
 
     /// Give keyboard focus back to the app underneath without hiding the
@@ -507,7 +546,7 @@ impl StatusItemController {
     /// without activating this app.
     pub fn toggle_popover(&self, mtm: MainThreadMarker) {
         if self.panel.isVisible() {
-            self.panel.orderOut(None);
+            self.close();
             return;
         }
 
@@ -523,8 +562,52 @@ impl StatusItemController {
             }
         }
 
+        self.present_animated();
+    }
+
+    /// Open the floater with its top-left corner near `point` (screen
+    /// coordinates), kept on that screen. Already open: move it there.
+    pub fn open_at(&self, mtm: MainThreadMarker, point: NSPoint) {
+        self.needs_initial_placement.set(false);
+        let size = self.panel.frame().size;
+        let visible = NSScreen::screens(mtm)
+            .iter()
+            .map(|s| (s.frame(), s.visibleFrame()))
+            .find(|(f, _)| rect_contains_point(*f, point))
+            .map(|(_, v)| v)
+            .or_else(|| NSScreen::mainScreen(mtm).map(|s| s.visibleFrame()));
+        let mut x = point.x + 6.0;
+        let mut top = point.y - 6.0;
+        if let Some(v) = visible {
+            x = x.clamp(v.origin.x + 6.0, (v.origin.x + v.size.width - size.width - 6.0).max(v.origin.x));
+            top = top.clamp(v.origin.y + size.height + 6.0, v.origin.y + v.size.height - 6.0);
+        }
+        crate::preview::close();
+        self.panel.setFrameTopLeftPoint(NSPoint::new(x, top));
+        if self.panel.isVisible() {
+            return;
+        }
+        self.present_animated();
+    }
+
+    /// Fade in with a short upward drift, then focus search.
+    fn present_animated(&self) {
+        let end = self.panel.frame();
+        let mut start = end;
+        start.origin.y -= 10.0;
+        self.panel.setAlphaValue(0.0);
+        self.panel.setFrame_display(start, false);
         self.panel.orderFrontRegardless();
         self.panel.makeKeyWindow();
+        let panel = self.panel.clone();
+        theme::animate(
+            theme::T_BASE,
+            move || {
+                panel.animator().setAlphaValue(1.0);
+                panel.animator().setFrame_display(end, true);
+            },
+            None,
+        );
 
         if !self.settings_visible.get() {
             let _ = self.panel.makeFirstResponder(Some(&self.search_field));
@@ -605,80 +688,83 @@ impl StatusItemController {
         *self.display_order.borrow_mut() = order;
         let cursor = if self.select_mode.get() { None } else { self.highlight_id.get() };
         let suggestion = self.suggestion.borrow().clone();
+        let flash = self.flash.take();
         let mut cursor_frame: Option<NSRect> = None;
 
-        // Compute total document height (top → bottom sections).
-        let mut content_h = 4.0_f64;
+        let rows_h = |list: &[&ClipboardItem]| -> f64 {
+            list.iter().map(|i| row::row_height(i) + ROW_GAP).sum()
+        };
+        let both = !pinned.is_empty() && !recent.is_empty();
+        let mut content_h = 6.0_f64;
         if !pinned.is_empty() {
-            content_h += SECTION_H + 2.0;
-            content_h += pinned.len() as f64 * (ROW_H + ROW_GAP);
-            if !recent.is_empty() {
-                content_h += SEP_H + 6.0;
-            }
+            content_h += SECTION_H + 4.0 + rows_h(&pinned);
+        }
+        if both {
+            content_h += SEP_H + 12.0;
         }
         if !recent.is_empty() {
-            // Show "Recent" header only when there is also a pinned section.
-            if !pinned.is_empty() {
-                content_h += SECTION_H + 2.0;
+            if both {
+                content_h += SECTION_H + 4.0;
             }
-            content_h += recent.len() as f64 * (ROW_H + ROW_GAP);
+            content_h += rows_h(&recent);
         }
-        content_h += 4.0;
+        content_h += 6.0;
         let doc_h = content_h.max(clip_h);
         self.list_document
             .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(list_w, doc_h)));
 
         // Lay out from the top of the document (y grows upward in AppKit).
-        let mut y = doc_h - 4.0;
+        let mut y = doc_h - 6.0;
         let select = self.select_mode.get();
+
+        let mut place_rows = |list: &[&ClipboardItem], y: &mut f64| {
+            for item in list {
+                let h = row::row_height(item);
+                *y -= h;
+                let state = row::RowState {
+                    select_mode: select,
+                    selected: self.is_selected(item.id),
+                    cursor: cursor == Some(item.id),
+                    suggestion: suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str()),
+                };
+                let view = row::make_row(mtm, item, action_target, &state, content_w);
+                let frame = NSRect::new(NSPoint::new(PAD, *y), NSSize::new(content_w, h));
+                view.setFrame(frame);
+                if state.cursor {
+                    cursor_frame = Some(frame);
+                }
+                self.list_document.addSubview(&view);
+                if let Some((id, kind)) = flash {
+                    if id == item.id {
+                        let color = match kind {
+                            Flash::Pinned => theme::neon_pin(),
+                            Flash::Unpinned => theme::glass(0.9),
+                        };
+                        theme::flash(mtm, &view, &color, 9.0);
+                    }
+                }
+                *y -= ROW_GAP;
+            }
+        };
 
         if !pinned.is_empty() {
             y -= SECTION_H;
-            let header = section_header(mtm, "Pinned", PAD, y, content_w);
+            let header = section_header(mtm, &format!("Pinned  ·  {}", pinned.len()), PAD, y, content_w);
             self.list_document.addSubview(&header);
             y -= 4.0;
-
-            for item in &pinned {
-                y -= ROW_H;
-                let selected = self.is_selected(item.id) || cursor == Some(item.id);
-                let hint = suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str());
-                let row = make_history_row(mtm, item, action_target, select, selected, hint, content_w);
-                let frame = NSRect::new(NSPoint::new(PAD, y), NSSize::new(content_w, ROW_H));
-                row.setFrame(frame);
-                if cursor == Some(item.id) {
-                    cursor_frame = Some(frame);
-                }
-                self.list_document.addSubview(&row);
-                y -= ROW_GAP;
-            }
-
-            if !recent.is_empty() {
-                y -= 6.0;
-                y -= SEP_H;
-                let sep = section_separator(mtm, PAD, y, content_w);
-                self.list_document.addSubview(&sep);
-                y -= 6.0;
-
-                y -= SECTION_H;
-                let header = section_header(mtm, "Recent", PAD, y, content_w);
-                self.list_document.addSubview(&header);
-                y -= 4.0;
-            }
+            place_rows(&pinned, &mut y);
         }
-
-        for item in &recent {
-            y -= ROW_H;
-            let selected = self.is_selected(item.id) || cursor == Some(item.id);
-            let hint = suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str());
-            let row = make_history_row(mtm, item, action_target, select, selected, hint, content_w);
-            let frame = NSRect::new(NSPoint::new(PAD, y), NSSize::new(content_w, ROW_H));
-            row.setFrame(frame);
-            if cursor == Some(item.id) {
-                cursor_frame = Some(frame);
-            }
-            self.list_document.addSubview(&row);
-            y -= ROW_GAP;
+        if both {
+            y -= 6.0 + SEP_H;
+            let sep = section_separator(mtm, PAD, y, content_w);
+            self.list_document.addSubview(&sep);
+            y -= 6.0;
+            y -= SECTION_H;
+            let header = section_header(mtm, &format!("Recent  ·  {}", recent.len()), PAD, y, content_w);
+            self.list_document.addSubview(&header);
+            y -= 4.0;
         }
+        place_rows(&recent, &mut y);
 
         // Keep newest content visible at the top of the scroll view.
         let clip = self.scroll_view.contentView();
@@ -728,6 +814,7 @@ struct PopoverParts {
     delete_selected_button: Retained<NSButton>,
     clear_history_button: Retained<NSButton>,
     cancel_select_button: Retained<NSButton>,
+    pin_selected_button: Retained<NSButton>,
 }
 
 fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
@@ -749,15 +836,19 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     // Leave room for the (transparent) title bar strip used for dragging.
     let header_y = POPOVER_HEIGHT - HEADER_H - 14.0;
 
-    // Wordmark — medium weight, primary label (not heavy bold).
-    let header = NSTextField::labelWithString(ns_string!("ZnonClip"), mtm);
+    // Wordmark: a live dot and tracked monospaced caps in the accent colour.
+    let dot = theme::rounded_box(mtm, theme::rect(PAD + 1.0, header_y + 10.5, 7.0, 7.0), 3.5, &theme::neon(), None);
+    dot.setAutoresizingMask(top);
+    dot.setToolTip(Some(ns_string!("Capturing")));
+    root.addSubview(&dot);
+    let header = NSTextField::labelWithString(ns_string!("Z N O N C L I P"), mtm);
     header.setFrame(NSRect::new(
-        NSPoint::new(PAD, header_y),
-        NSSize::new(140.0, HEADER_H - 6.0),
+        NSPoint::new(PAD + 14.0, header_y + 2.0),
+        NSSize::new(150.0, HEADER_H - 10.0),
     ));
     header.setAutoresizingMask(top);
-    header.setFont(Some(unsafe { NSFont::systemFontOfSize_weight(13.0, NSFontWeightSemibold) }.as_ref()));
-    header.setTextColor(Some(&NSColor::labelColor()));
+    header.setFont(Some(&theme::mono_semibold(11.0)));
+    header.setTextColor(Some(&theme::neon()));
     root.addSubview(&header);
 
     // Hotkey chip (quiet monospaced digits — signature of macOS utilities).
@@ -805,7 +896,13 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     root.addSubview(&gear_button);
 
     // Hairline under header.
-    let header_sep = hairline(mtm, PAD, header_y - 6.0, POPOVER_WIDTH - PAD * 2.0);
+    let header_sep = theme::rounded_box(
+        mtm,
+        theme::rect(PAD, header_y - 6.0, POPOVER_WIDTH - PAD * 2.0, 1.0),
+        0.5,
+        &theme::with_alpha(&theme::neon(), 0.28),
+        None,
+    );
     header_sep.setAutoresizingMask(top_wide);
     root.addSubview(&header_sep);
 
@@ -869,10 +966,11 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     select_button.setAutoresizingMask(top_right);
     history_container.addSubview(&select_button);
 
+    // Select-mode toolbar, right to left: [Pin] [Delete (n)] [Cancel].
     let delete_selected_button = make_toolbar_text_button(
         mtm,
         "Delete",
-        right - btn_w * 2.0 - 4.0,
+        right - btn_w - 4.0 - (btn_w + 24.0),
         toolbar_y,
         btn_w + 24.0,
         btn_h,
@@ -883,6 +981,24 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     delete_selected_button.setEnabled(false);
     delete_selected_button.setAutoresizingMask(top_right);
     history_container.addSubview(&delete_selected_button);
+
+    let pin_selected_button = make_toolbar_text_button(
+        mtm,
+        "Pin",
+        right - btn_w - 4.0 - (btn_w + 24.0) - 4.0 - btn_w,
+        toolbar_y,
+        btn_w,
+        btn_h,
+        false,
+    );
+    pin_selected_button.setContentTintColor(Some(&theme::neon_pin()));
+    pin_selected_button.setToolTip(Some(ns_string!(
+        "Pin the selected items (unpins them if they are all pinned already)"
+    )));
+    pin_selected_button.setHidden(true);
+    pin_selected_button.setEnabled(false);
+    pin_selected_button.setAutoresizingMask(top_right);
+    history_container.addSubview(&pin_selected_button);
 
     let cancel_select_button =
         make_toolbar_text_button(mtm, "Cancel", right - btn_w, toolbar_y, btn_w, btn_h, false);
@@ -951,11 +1067,31 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     // Translucent background (menu-bar material) behind everything.
     let effect = NSVisualEffectView::new(mtm);
     effect.setFrame(root.frame());
-    effect.setMaterial(NSVisualEffectMaterial::Popover);
+    effect.setMaterial(NSVisualEffectMaterial::HUDWindow);
     effect.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     effect.setState(NSVisualEffectState::Active);
     effect.setAutoresizingMask(fill);
+    // Dark tint so the glass stays deep over bright windows.
+    let tint = theme::rounded_box(
+        mtm,
+        theme::rect(0.0, 0.0, POPOVER_WIDTH, POPOVER_HEIGHT),
+        0.0,
+        &NSColor::colorWithWhite_alpha(0.04, 0.55),
+        None,
+    );
+    tint.setAutoresizingMask(fill);
+    effect.addSubview(&tint);
     effect.addSubview(&root);
+    // Neon rim just inside the window edge.
+    let rim = theme::rounded_box(
+        mtm,
+        theme::rect(0.5, 0.5, POPOVER_WIDTH - 1.0, POPOVER_HEIGHT - 1.0),
+        11.0,
+        &NSColor::clearColor(),
+        Some((&theme::with_alpha(&theme::neon(), 0.22), 1.0)),
+    );
+    rim.setAutoresizingMask(fill);
+    effect.addSubview(&rim);
 
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Resizable
@@ -988,6 +1124,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
     panel.setMinSize(NSSize::new(MIN_W, MIN_H));
+    panel.setAppearance(theme::dark_appearance().as_deref());
     panel.setContentView(Some(&effect));
     // Restores the last size/position if one was saved.
     let _ = panel.setFrameAutosaveName(&NSString::from_str(FRAME_AUTOSAVE));
@@ -1023,6 +1160,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         delete_selected_button,
         clear_history_button,
         cancel_select_button,
+        pin_selected_button,
     }
 }
 
@@ -1037,8 +1175,8 @@ fn section_header(
     // (e.g. "Recent Network Activity").
     let label = NSTextField::labelWithString(&NSString::from_str(&title.to_ascii_uppercase()), mtm);
     label.setFrame(NSRect::new(NSPoint::new(x + 2.0, y), NSSize::new(w - 2.0, SECTION_H)));
-    label.setFont(Some(unsafe { NSFont::systemFontOfSize_weight(11.0, NSFontWeightMedium) }.as_ref()));
-    label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    label.setFont(Some(&theme::mono(9.5)));
+    label.setTextColor(Some(&theme::with_alpha(&theme::neon(), 0.7)));
     label.setAlignment(NSTextAlignment::Left);
     label
 }
@@ -1286,231 +1424,13 @@ fn make_popup(mtm: MainThreadMarker, x: f64, y: f64, w: f64) -> Retained<NSPopUp
     popup
 }
 
-/// Composite history row: rounded selection fill + icon + preview + relative time.
-/// Matches macOS utility lists (icon | primary | trailing meta).
-fn make_history_row(
-    mtm: MainThreadMarker,
-    item: &ClipboardItem,
-    action_target: &AnyObject,
-    select_mode: bool,
-    selected: bool,
-    suggestion: Option<&str>,
-    width: f64,
-) -> Retained<NSView> {
-    let row = NSView::new(mtm);
-    row.setFrame(NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(width, ROW_H),
-    ));
-
-    if selected {
-        let bg = NSBox::new(mtm);
-        bg.setBoxType(NSBoxType::Custom);
-        bg.setTitlePosition(NSTitlePosition::NoTitle);
-        bg.setBorderWidth(0.0);
-        bg.setCornerRadius(ROW_RADIUS);
-        bg.setFillColor(&NSColor::controlAccentColor().colorWithAlphaComponent(0.18));
-        bg.setFrame(NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(width, ROW_H),
-        ));
-        row.addSubview(&bg);
-    }
-
-    let action = if select_mode {
-        sel!(toggleItemSelection:)
-    } else {
-        sel!(copyHistoryItem:)
-    };
-
-    let preview = truncate_chars(&item.preview, 40);
-    // Primary hit target spans icon + preview; trailing time stays out of the way.
-    let hit_w = (width - TIME_COL - 6.0).max(80.0);
-    let button = unsafe {
-        NSButton::buttonWithTitle_target_action(
-            &NSString::from_str(&preview),
-            Some(action_target),
-            Some(action),
-            mtm,
-        )
-    };
-    button.setBordered(!selected);
-    if !selected {
-        button.setBezelStyle(NSBezelStyle::AccessoryBar);
-        button.setShowsBorderOnlyWhileMouseInside(true);
-    } else {
-        button.setBordered(false);
-    }
-    button.setFont(Some(&NSFont::systemFontOfSize(12.0)));
-    button.setAlignment(NSTextAlignment::Left);
-    button.setTag(item.id as isize);
-    button.setImagePosition(NSCellImagePosition::ImageLeft);
-    button.setImageScaling(NSImageScaling::ScaleProportionallyDown);
-    button.setUsesSingleLineMode(true);
-    button.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-    button.setFrame(NSRect::new(
-        NSPoint::new(0.0, 0.0),
-        NSSize::new(hit_w, ROW_H),
-    ));
-
-    let symbol_name = if select_mode {
-        if selected {
-            "checkmark.circle.fill"
-        } else {
-            "circle"
-        }
-    } else if suggestion.is_some() {
-        "sparkles"
-    } else if item.is_pinned {
-        "pin.fill"
-    } else {
-        item.content_type.sf_symbol()
-    };
-    // Image rows show the stored thumbnail in place of the generic photo glyph.
-    // Select-mode checkboxes and the suggestion sparkle keep priority.
-    let thumb = if select_mode || suggestion.is_some() {
-        None
-    } else {
-        row_thumbnail(item)
-    };
-    if let Some(image) = thumb.or_else(|| system_symbol(symbol_name, item.content_type.label(), 12.0)) {
-        button.setImage(Some(&image));
-    }
-    // Do not set contentTintColor here — it would recolor the title text as well.
-    // Template SF Symbols already render in the correct secondary system style.
-
-    let tip = item
-        .content_text
-        .as_deref()
-        .unwrap_or(item.preview.as_str());
-    let tip = if tip.chars().count() > 400 {
-        format!("{}…", tip.chars().take(400).collect::<String>())
-    } else {
-        tip.to_string()
-    };
-    let tip = if select_mode {
-        if selected {
-            format!("Selected · {tip}")
-        } else {
-            format!("Click to select · {tip}")
-        }
-    } else {
-        let mut prefix = String::new();
-        if let Some(reason) = suggestion {
-            prefix.push_str(&format!("Suggested ({reason}) · Enter to paste · "));
-        }
-        if item.is_pinned {
-            prefix.push_str("Pinned · ");
-        }
-        format!("{prefix}{tip}")
-    };
-    button.setToolTip(Some(&NSString::from_str(&tip)));
-
-    if !select_mode {
-        let menu = NSMenu::new(mtm);
-        menu.setAutoenablesItems(false);
-
-        let copy_item = unsafe {
-            menu.addItemWithTitle_action_keyEquivalent(
-                ns_string!("Copy"),
-                Some(sel!(copyHistoryItem:)),
-                ns_string!(""),
-            )
-        };
-        copy_item.setTag(item.id as isize);
-        unsafe { copy_item.setTarget(Some(action_target)) };
-
-        let pin_title = if item.is_pinned {
-            ns_string!("Unpin")
-        } else {
-            ns_string!("Pin")
-        };
-        let pin_item = unsafe {
-            menu.addItemWithTitle_action_keyEquivalent(
-                pin_title,
-                Some(sel!(pinHistoryItem:)),
-                ns_string!(""),
-            )
-        };
-        pin_item.setTag(item.id as isize);
-        unsafe { pin_item.setTarget(Some(action_target)) };
-
-        let del_item = unsafe {
-            menu.addItemWithTitle_action_keyEquivalent(
-                ns_string!("Delete"),
-                Some(sel!(deleteHistoryItem:)),
-                ns_string!(""),
-            )
-        };
-        del_item.setTag(item.id as isize);
-        unsafe { del_item.setTarget(Some(action_target)) };
-
-        unsafe { button.setMenu(Some(&menu)) };
-    }
-
-    row.addSubview(&button);
-
-    let rel = format_relative_time(&item.created_at);
-    if !rel.is_empty() {
-        let time_label = NSTextField::labelWithString(&NSString::from_str(&rel), mtm);
-        time_label.setFrame(NSRect::new(
-            NSPoint::new(width - TIME_COL - 4.0, (ROW_H - 14.0) / 2.0),
-            NSSize::new(TIME_COL, 14.0),
-        ));
-        time_label.setFont(Some(unsafe { NSFont::monospacedDigitSystemFontOfSize_weight(10.0, NSFontWeightRegular) }.as_ref()));
-        time_label.setTextColor(Some(&NSColor::tertiaryLabelColor()));
-        time_label.setAlignment(NSTextAlignment::Right);
-        time_label.setEditable(false);
-        time_label.setSelectable(false);
-        row.addSubview(&time_label);
-    }
-
-    row
-}
-
-/// Row thumbnail edge, in points. The stored bitmap is up to 256 px, so this
-/// stays sharp on Retina.
-const ROW_THUMB: f64 = 24.0;
-
-/// Decode an image item's stored thumbnail, aspect-fit inside `ROW_THUMB`.
-fn row_thumbnail(item: &ClipboardItem) -> Option<Retained<NSImage>> {
-    if item.content_type != ContentType::Image {
-        return None;
-    }
-    let bytes = item.content_image.as_deref()?;
-    let data = NSData::with_bytes(bytes);
-    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
-    let size = image.size();
-    if size.width <= 0.0 || size.height <= 0.0 {
-        return None;
-    }
-    let scale = (ROW_THUMB / size.width).min(ROW_THUMB / size.height);
-    image.setSize(NSSize::new(
-        (size.width * scale).max(1.0),
-        (size.height * scale).max(1.0),
-    ));
-    image.setAccessibilityDescription(Some(ns_string!("Image")));
-    Some(image)
-}
-
-/// System SF Symbol sized for list UI (template rendering).
+/// SF Symbol sized for list UI (template rendering).
 fn system_symbol(name: &str, a11y: &str, point_size: f64) -> Option<Retained<NSImage>> {
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str(name),
-        Some(&NSString::from_str(a11y)),
-    )?;
-    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight_scale(
-        point_size,
-        unsafe { NSFontWeightRegular },
-        NSImageSymbolScale::Medium,
-    );
-    let configured = image.imageWithSymbolConfiguration(&config)?;
-    configured.setTemplate(true);
-    Some(configured)
+    theme::symbol(name, a11y, point_size)
 }
 
 /// Compact relative time for trailing meta column: "now", "1m", "2h", "3d".
-fn format_relative_time(created_at: &str) -> String {
+pub(crate) fn format_relative_time(created_at: &str) -> String {
     let Some(secs) = parse_iso8601_to_unix_secs(created_at) else {
         return String::new();
     };
@@ -1577,14 +1497,6 @@ fn civil_to_unix_secs(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
     days * 86_400 + (h as i64) * 3600 + (mi as i64) * 60 + s as i64
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
-    }
-}
 
 fn rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
     point.x >= rect.origin.x
@@ -1596,6 +1508,9 @@ fn rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
 /// Extract history item id from an NSControl or NSMenuItem sender.
 pub fn sender_item_id(sender: Option<&AnyObject>) -> Option<u64> {
     let sender = sender?;
+    if let Some(row) = sender.downcast_ref::<RowView>() {
+        return Some(row.item_id());
+    }
     if let Some(control) = sender.downcast_ref::<NSControl>() {
         let tag = control.tag();
         if tag > 0 {
