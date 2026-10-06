@@ -299,21 +299,40 @@ pub const KEY_UP: u16 = 126;
 pub const KEY_P: u16 = 35;
 pub const KEY_E: u16 = 14;
 pub const KEY_DELETE: u16 = 51;
+pub const KEY_EQUAL: u16 = 24;
+pub const KEY_MINUS: u16 = 27;
+pub const KEY_ZERO: u16 = 29;
+pub const KEY_PAD_PLUS: u16 = 69;
+pub const KEY_PAD_MINUS: u16 = 78;
+pub const KEY_PAD_ZERO: u16 = 82;
 /// Flag OR-ed into the code passed to `popoverNavKey:` for ⌘-chords.
 pub const CMD_CHORD: isize = 0x1_0000;
 
-/// ⌘P / ⌘E / ⌘⌫ with no other modifier: row actions on the highlighted item.
+/// ⌘P / ⌘E / ⌘⌫ (row actions on the highlighted item) and ⌘+ / ⌘− / ⌘0
+/// (zoom). Shift is allowed so ⌘⇧= also zooms in, as in every Mac app.
 fn row_chord_code(event: &NSEvent) -> Option<isize> {
     let code = event.keyCode();
-    if !matches!(code, KEY_P | KEY_E | KEY_DELETE) {
+    let zoom = matches!(code, KEY_EQUAL | KEY_MINUS | KEY_ZERO | KEY_PAD_PLUS | KEY_PAD_MINUS | KEY_PAD_ZERO);
+    if !zoom && !matches!(code, KEY_P | KEY_E | KEY_DELETE) {
         return None;
     }
     let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
-    let only_cmd = flags.contains(NSEventModifierFlags::Command)
-        && !flags.intersects(
-            NSEventModifierFlags::Control | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
-        );
-    only_cmd.then_some(code as isize | CMD_CHORD)
+    let mut blocked = NSEventModifierFlags::Control | NSEventModifierFlags::Option;
+    if !zoom {
+        blocked |= NSEventModifierFlags::Shift;
+    }
+    let ok = flags.contains(NSEventModifierFlags::Command) && !flags.intersects(blocked);
+    ok.then_some(code as isize | CMD_CHORD)
+}
+
+/// Zoom direction for a ⌘-chord key code: +1 in, -1 out, 0 reset.
+pub fn zoom_direction(code: u16) -> Option<i32> {
+    match code {
+        KEY_EQUAL | KEY_PAD_PLUS => Some(1),
+        KEY_MINUS | KEY_PAD_MINUS => Some(-1),
+        KEY_ZERO | KEY_PAD_ZERO => Some(0),
+        _ => None,
+    }
 }
 
 fn is_nav_key(event: &NSEvent) -> bool {

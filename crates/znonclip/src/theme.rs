@@ -16,6 +16,21 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
+// ── Zoom ────────────────────────────────────────────────────────────────────
+
+thread_local! {
+    static UI_SCALE: std::cell::Cell<f64> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Current ⌘+/⌘− zoom of the floater and preview (1.0 = 100%).
+pub fn ui_scale() -> f64 {
+    UI_SCALE.with(|s| s.get())
+}
+
+pub fn set_ui_scale(scale: f64) {
+    UI_SCALE.with(|s| s.set(scale));
+}
+
 // ── Palette ─────────────────────────────────────────────────────────────────
 
 /// Primary accent: neon cyan.
@@ -86,6 +101,16 @@ pub fn rounded_box(
     }
     b.setFrame(frame);
     b
+}
+
+/// Neon glow: a soft, offset-free shadow in `color` around what `view` draws.
+pub fn glow(view: &NSView, color: &NSColor, radius: f64) {
+    view.setWantsLayer(true);
+    let shadow = objc2_app_kit::NSShadow::new();
+    shadow.setShadowColor(Some(color));
+    shadow.setShadowBlurRadius(radius);
+    shadow.setShadowOffset(NSSize::new(0.0, 0.0));
+    view.setShadow(Some(&shadow));
 }
 
 /// Clip a view's layer to rounded corners.

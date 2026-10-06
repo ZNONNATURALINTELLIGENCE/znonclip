@@ -13,6 +13,7 @@ const KEY_HISTORY_LIMIT: &str = "history_limit";
 const KEY_HOTKEY: &str = "hotkey_preset";
 const KEY_LAUNCH_AT_LOGIN: &str = "launch_at_login";
 const KEY_FLOAT_PANEL: &str = "float_panel";
+const KEY_UI_SCALE: &str = "ui_scale";
 
 /// Preset global hotkey combinations (v1 — dropdown, not free-form recorder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,6 +101,8 @@ pub struct Settings {
     /// Keep the floater above other windows and open after a paste.
     /// Off: it behaves like a menu and closes on paste or an outside click.
     pub float_panel: bool,
+    /// Zoom of the floater and preview (⌘+ / ⌘− / ⌘0). 1.0 = 100%.
+    pub ui_scale: f64,
 }
 
 impl Default for Settings {
@@ -114,7 +117,29 @@ impl Default for Settings {
             launch_at_login: false,
             hotkey: HotkeyPreset::default(),
             float_panel: true,
+            ui_scale: 1.0,
         }
+    }
+}
+
+/// Zoom steps for ⌘+ / ⌘−, like browser zoom.
+pub const UI_SCALE_STEPS: [f64; 9] = [0.67, 0.75, 0.85, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75];
+
+/// The next zoom step from `current` in `direction` (+1 in, -1 out, 0 reset).
+pub fn next_ui_scale(current: f64, direction: i32) -> f64 {
+    match direction {
+        0 => 1.0,
+        d if d > 0 => UI_SCALE_STEPS
+            .iter()
+            .copied()
+            .find(|s| *s > current + 1e-3)
+            .unwrap_or(UI_SCALE_STEPS[UI_SCALE_STEPS.len() - 1]),
+        _ => UI_SCALE_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|s| *s < current - 1e-3)
+            .unwrap_or(UI_SCALE_STEPS[0]),
     }
 }
 
@@ -165,6 +190,11 @@ impl Settings {
         if let Ok(Some(v)) = storage.get_setting(KEY_FLOAT_PANEL) {
             s.float_panel = parse_bool(&v);
         }
+        if let Ok(Some(v)) = storage.get_setting(KEY_UI_SCALE) {
+            if let Ok(x) = v.parse::<f64>() {
+                s.ui_scale = x.clamp(UI_SCALE_STEPS[0], UI_SCALE_STEPS[UI_SCALE_STEPS.len() - 1]);
+            }
+        }
 
         info!(
             "settings loaded (poll={}ms, retention={}d, limit={}, auto_paste={}, hotkey={}, login={})",
@@ -191,6 +221,7 @@ impl Settings {
             if self.launch_at_login { "1" } else { "0" },
         );
         self.save_key(storage, KEY_FLOAT_PANEL, if self.float_panel { "1" } else { "0" });
+        self.save_key(storage, KEY_UI_SCALE, &format!("{:.2}", self.ui_scale));
     }
 
     /// Persist auto-paste flag.
@@ -262,4 +293,21 @@ pub fn poll_label(ms: u64) -> String {
 /// Label for history limit popup.
 pub fn history_limit_label(n: usize) -> String {
     format!("{n} items")
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    #[test]
+    fn zoom_steps_walk_and_clamp() {
+        assert_eq!(next_ui_scale(1.0, 1), 1.1);
+        assert_eq!(next_ui_scale(1.0, -1), 0.9);
+        assert_eq!(next_ui_scale(1.75, 1), 1.75);
+        assert_eq!(next_ui_scale(0.67, -1), 0.67);
+        assert_eq!(next_ui_scale(1.5, 0), 1.0);
+        // Off-grid values snap to the next step in that direction.
+        assert_eq!(next_ui_scale(1.2, 1), 1.25);
+        assert_eq!(next_ui_scale(1.2, -1), 1.1);
+    }
 }

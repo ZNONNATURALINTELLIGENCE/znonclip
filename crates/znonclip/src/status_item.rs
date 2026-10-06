@@ -71,6 +71,10 @@ pub enum Flash {
 pub struct StatusItemController {
     pub status_item: Retained<NSStatusItem>,
     pub panel: Retained<NSPanel>,
+    /// Everything inside the glass, laid out at logical (unzoomed) size.
+    root: Retained<NSView>,
+    /// Parent of `root`; its bounds carry the ⌘+/⌘− zoom.
+    zoom_host: Retained<NSView>,
     /// "Float on top" checkbox in the header.
     pub float_checkbox: Retained<NSButton>,
     /// Shared with the outside-click monitor: when true the floater stays open.
@@ -193,6 +197,8 @@ impl StatusItemController {
         Self {
             status_item,
             panel: built.panel,
+            root: built.root,
+            zoom_host: built.zoom_host,
             float_checkbox: built.float_checkbox,
             float_on_top,
             needs_initial_placement: Cell::new(!restored),
@@ -429,6 +435,42 @@ impl StatusItemController {
     pub fn close(&self) {
         crate::preview::close();
         self.panel.orderOut(None);
+    }
+
+    /// Zoom the floater to `scale`: the window grows or shrinks around its
+    /// top-left corner (kept on screen) and the content scales with it.
+    pub fn set_ui_scale(&self, mtm: MainThreadMarker, scale: f64) {
+        let old = theme::ui_scale();
+        theme::set_ui_scale(scale);
+        let f = self.panel.frame();
+        let mut w = f.size.width / old * scale;
+        let mut h = f.size.height / old * scale;
+        let top = f.origin.y + f.size.height;
+        let mut x = f.origin.x;
+        if let Some(v) = NSScreen::screens(mtm)
+            .iter()
+            .find(|s| rect_contains_point(s.frame(), NSPoint::new(f.origin.x + 1.0, top - 1.0)))
+            .map(|s| s.visibleFrame())
+        {
+            w = w.min(v.size.width - 12.0);
+            h = h.min(v.size.height - 12.0);
+            x = x.min(v.origin.x + v.size.width - w - 6.0).max(v.origin.x + 6.0);
+        }
+        self.panel
+            .setFrame_display(NSRect::new(NSPoint::new(x, top - h), NSSize::new(w, h)), true);
+        self.reapply_scale();
+    }
+
+    /// Re-fit the zoom after any frame change (window resize, restore).
+    pub fn reapply_scale(&self) {
+        let scale = theme::ui_scale();
+        let host = self.zoom_host.frame().size;
+        let logical = NSSize::new(host.width / scale, host.height / scale);
+        self.zoom_host.setBoundsSize(logical);
+        self.zoom_host.setBoundsOrigin(NSPoint::new(0.0, 0.0));
+        // A normal frame change: root's subviews autoresize in logical points.
+        self.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), logical));
+        self.panel.setMinSize(NSSize::new(MIN_W * scale, MIN_H * scale));
     }
 
     /// Flash row `id` on the next render (action feedback).
@@ -794,6 +836,8 @@ impl StatusItemController {
 
 struct PopoverParts {
     panel: Retained<NSPanel>,
+    root: Retained<NSView>,
+    zoom_host: Retained<NSView>,
     float_checkbox: Retained<NSButton>,
     search_field: Retained<NSSearchField>,
     auto_paste_checkbox: Retained<NSButton>,
@@ -839,6 +883,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     // Wordmark: a live dot and tracked monospaced caps in the accent colour.
     let dot = theme::rounded_box(mtm, theme::rect(PAD + 1.0, header_y + 10.5, 7.0, 7.0), 3.5, &theme::neon(), None);
     dot.setAutoresizingMask(top);
+    theme::glow(&dot, &theme::neon(), 7.0);
     dot.setToolTip(Some(ns_string!("Capturing")));
     root.addSubview(&dot);
     let header = NSTextField::labelWithString(ns_string!("Z N O N C L I P"), mtm);
@@ -849,6 +894,7 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     header.setAutoresizingMask(top);
     header.setFont(Some(&theme::mono_semibold(11.0)));
     header.setTextColor(Some(&theme::neon()));
+    theme::glow(&header, &theme::with_alpha(&theme::neon(), 0.9), 6.0);
     root.addSubview(&header);
 
     // Hotkey chip (quiet monospaced digits — signature of macOS utilities).
@@ -900,9 +946,10 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         mtm,
         theme::rect(PAD, header_y - 6.0, POPOVER_WIDTH - PAD * 2.0, 1.0),
         0.5,
-        &theme::with_alpha(&theme::neon(), 0.28),
+        &theme::with_alpha(&theme::neon(), 0.65),
         None,
     );
+    theme::glow(&header_sep, &theme::neon(), 5.0);
     header_sep.setAutoresizingMask(top_wide);
     root.addSubview(&header_sep);
 
@@ -923,6 +970,16 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     search_field.setPlaceholderString(Some(ns_string!("Search")));
     search_field.setAutoresizingMask(top_wide);
     history_container.addSubview(&search_field);
+    // Neon outline around the search field.
+    let search_rim = theme::rounded_box(
+        mtm,
+        search_field.frame(),
+        7.0,
+        &NSColor::clearColor(),
+        Some((&theme::with_alpha(&theme::neon(), 0.45), 1.0)),
+    );
+    search_rim.setAutoresizingMask(top_wide);
+    history_container.addSubview(&search_rim);
 
     // Toolbar: quiet secondary actions — [Auto-paste] …… [Select] [Clear]
     let toolbar_y = history_container.frame().size.height - SEARCH_H - TOOLBAR_H - 12.0;
@@ -1081,16 +1138,25 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     );
     tint.setAutoresizingMask(fill);
     effect.addSubview(&tint);
-    effect.addSubview(&root);
+    // Zoom host: tracks the window, never autoresizes its child. The content
+    // (`root`) is laid out at a logical size and the host scales it up or down.
+    let zoom_host = NSView::new(mtm);
+    zoom_host.setFrame(root.frame());
+    zoom_host.setAutoresizingMask(fill);
+    zoom_host.setAutoresizesSubviews(false);
+    root.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+    zoom_host.addSubview(&root);
+    effect.addSubview(&zoom_host);
     // Neon rim just inside the window edge.
     let rim = theme::rounded_box(
         mtm,
         theme::rect(0.5, 0.5, POPOVER_WIDTH - 1.0, POPOVER_HEIGHT - 1.0),
         11.0,
         &NSColor::clearColor(),
-        Some((&theme::with_alpha(&theme::neon(), 0.22), 1.0)),
+        Some((&theme::with_alpha(&theme::neon(), 0.6), 1.5)),
     );
     rim.setAutoresizingMask(fill);
+    theme::glow(&rim, &theme::neon(), 10.0);
     effect.addSubview(&rim);
 
     let style = NSWindowStyleMask::Titled
@@ -1140,6 +1206,8 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
 
     PopoverParts {
         panel,
+        root,
+        zoom_host,
         float_checkbox,
         search_field,
         auto_paste_checkbox,
@@ -1176,7 +1244,8 @@ fn section_header(
     let label = NSTextField::labelWithString(&NSString::from_str(&title.to_ascii_uppercase()), mtm);
     label.setFrame(NSRect::new(NSPoint::new(x + 2.0, y), NSSize::new(w - 2.0, SECTION_H)));
     label.setFont(Some(&theme::mono(9.5)));
-    label.setTextColor(Some(&theme::with_alpha(&theme::neon(), 0.7)));
+    label.setTextColor(Some(&theme::with_alpha(&theme::neon(), 0.95)));
+    theme::glow(&label, &theme::with_alpha(&theme::neon(), 0.6), 4.0);
     label.setAlignment(NSTextAlignment::Left);
     label
 }

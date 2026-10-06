@@ -289,11 +289,13 @@ pub fn make_row(
             mtm,
             rect(0.0, 0.0, width, h),
             RADIUS,
-            &theme::with_alpha(&accent, 0.13),
-            Some((&theme::with_alpha(&accent, 0.55), 1.0)),
+            &theme::with_alpha(&accent, 0.18),
+            Some((&theme::with_alpha(&accent, 0.95), 1.2)),
         );
+        theme::glow(&glow, &theme::with_alpha(&accent, 0.85), 8.0);
         row.addSubview(&glow);
         let bar = theme::rounded_box(mtm, rect(1.0, 9.0, 3.0, h - 18.0), 1.5, &accent, None);
+        theme::glow(&bar, &accent, 6.0);
         row.addSubview(&bar);
     }
 
@@ -349,9 +351,10 @@ pub fn make_row(
             } else if item.is_pinned {
                 theme::neon_pin()
             } else {
-                theme::with_alpha(&theme::neon(), 0.85)
+                theme::neon()
             };
             iv.setContentTintColor(Some(&tint));
+            theme::glow(&iv, &theme::with_alpha(&tint, 0.7), 4.0);
             row.addSubview(&iv);
         }
     }
@@ -409,13 +412,13 @@ fn action_strip(mtm: MainThreadMarker, item: &ClipboardItem, target: &AnyObject)
             if pinned { "pin.fill" } else { "pin" },
             if pinned { "Unpin (⌘P)" } else { "Pin (⌘P)" },
             sel!(pinHistoryItem:),
-            if pinned { theme::neon_pin() } else { NSColor::secondaryLabelColor() },
+            if pinned { theme::neon_pin() } else { theme::with_alpha(&theme::neon_pin(), 0.8) },
         ),
         (
             "arrow.up.left.and.arrow.down.right",
             "Expand preview (⌘E)",
             sel!(expandHistoryItem:),
-            NSColor::secondaryLabelColor(),
+            theme::with_alpha(&theme::neon(), 0.8),
         ),
         (
             "arrow.turn.down.left",

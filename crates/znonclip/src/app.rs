@@ -100,6 +100,9 @@ define_class!(
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.reapply_scale();
+            }
             let target: *const AnyObject = (self as *const Self).cast();
             self.reload_list(mtm, unsafe { &*target });
         }
@@ -145,6 +148,9 @@ define_class!(
 
             let controller = StatusItemController::create(mtm);
             controller.apply_settings_ui(&self.ivars().settings.borrow());
+            // The saved frame is already zoomed; only the content scale needs restoring.
+            crate::theme::set_ui_scale(self.ivars().settings.borrow().ui_scale);
+            controller.reapply_scale();
 
             // SAFETY: self lives for process lifetime.
             let target: *const AnyObject = (self as *const Self).cast();
@@ -221,6 +227,11 @@ define_class!(
             }
             // ⌘-chords on the highlighted row: ⌘P pin, ⌘E expand, ⌘⌫ delete.
             if code & hotkey::CMD_CHORD != 0 {
+                if let Some(dir) = hotkey::zoom_direction((code & !hotkey::CMD_CHORD) as u16) {
+                    drop(status_ref);
+                    self.zoom(dir);
+                    return Bool::YES;
+                }
                 let Some(id) = status.highlighted_id() else {
                     return Bool::NO;
                 };
@@ -907,6 +918,26 @@ impl ZnonClipAppDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
+    /// ⌘+ / ⌘− / ⌘0: step the floater zoom, persist it, re-render.
+    fn zoom(&self, direction: i32) {
+        let mtm = self.mtm();
+        let target: *const AnyObject = (self as *const Self).cast();
+        let current = crate::theme::ui_scale();
+        let next = crate::settings::next_ui_scale(current, direction);
+        if (next - current).abs() < 1e-3 {
+            return;
+        }
+        preview::close();
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.set_ui_scale(mtm, next);
+            status.set_status_notice(Some(&format!("Zoom {:.0}%  ·  ⌘0 resets", next * 100.0)));
+        }
+        self.ivars().settings.borrow_mut().ui_scale = next;
+        self.persist_settings();
+        self.reload_list(mtm, unsafe { &*target });
+        info!("ui zoom {current:.2} → {next:.2}");
+    }
+
     /// Pin or unpin `id` (respecting the pin cap), re-render, flash the row.
     fn toggle_pin(&self, id: u64) {
         let mtm = self.mtm();
@@ -1088,6 +1119,16 @@ impl ZnonClipAppDelegate {
             if let Some(content) = status.panel.contentView() {
                 save(&content, "floater.png");
             }
+            // Zoomed renders; the frame is put back so the saved position is untouched.
+            for (scale, name) in [(1.5, "floater-zoom150.png"), (0.75, "floater-zoom75.png")] {
+                status.set_ui_scale(mtm, scale);
+                status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe { &*target });
+                if let Some(content) = status.panel.contentView() {
+                    save(&content, name);
+                }
+            }
+            status.set_ui_scale(mtm, 1.0);
+            status.refresh_history(mtm, &self.ivars().history.borrow(), unsafe { &*target });
             status.set_select_mode(true);
             for i in items.iter().take(2) {
                 status.toggle_selection(i.id);

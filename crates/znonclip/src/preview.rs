@@ -208,8 +208,9 @@ fn present(
         rect(0.0, 0.0, size.width, size.height),
         RADIUS,
         &NSColor::clearColor(),
-        Some((&theme::with_alpha(&theme::neon(), if expanded { 0.55 } else { 0.32 }), 1.0)),
+        Some((&theme::with_alpha(&theme::neon(), if expanded { 0.9 } else { 0.65 }), 1.2)),
     );
+    theme::glow(&rim, &theme::neon(), 8.0);
     rim.setAutoresizingMask(
         NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
     );
@@ -224,6 +225,13 @@ fn present(
     glass.addSubview(&content);
     glass.addSubview(&rim);
 
+    // ⌘+/⌘− zoom: the panel is scaled, its content keeps logical coordinates.
+    let scale = theme::ui_scale();
+    let logical = size;
+    let size = NSSize::new(logical.width * scale, logical.height * scale);
+    glass.setFrame(rect(0.0, 0.0, size.width, size.height));
+    glass.setBoundsSize(logical);
+    theme::round_corners(&glass, RADIUS * scale);
     let frame = place(size, anchor, floater);
     let was_visible = p.panel.isVisible() && p.panel.alphaValue() > 0.5;
     p.panel.setIgnoresMouseEvents(!expanded);
