@@ -76,6 +76,7 @@ impl Storage {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        enable_incremental_auto_vacuum(&conn)?;
 
         let storage = Self {
             conn,
@@ -365,11 +366,24 @@ impl Storage {
 
         let deleted = time_deleted + count_deleted;
         if deleted > 0 {
+            // Hand freed pages (image thumbnails are the bulk) back to the OS.
+            self.reclaim_free_pages()?;
             info!(
                 "pruned {deleted} clipboard items (time={time_deleted}, count={count_deleted})"
             );
         }
         Ok(deleted)
+    }
+
+    /// Release free pages left by deletes. Cheap no-op when there are none.
+    ///
+    /// `incremental_vacuum` frees one page per statement step, so every row
+    /// must be stepped; a single `execute_batch` step frees only one page.
+    pub fn reclaim_free_pages(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
+        Ok(())
     }
 
     // ── Pin / delete ────────────────────────────────────────────────────────
@@ -658,6 +672,24 @@ fn unix_secs_to_utc_parts(mut secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     (y, m, d, hour, min, sec)
 }
 
+/// `auto_vacuum` mode 2 (INCREMENTAL). Without it SQLite never shrinks the file:
+/// pruned thumbnails leave free pages behind forever.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// Switch the database to incremental auto-vacuum. A database created before
+/// this setting needs one full `VACUUM` to restructure; that runs once, on the
+/// first open after upgrade, and never again.
+fn enable_incremental_auto_vacuum(conn: &Connection) -> Result<()> {
+    let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+    if mode == AUTO_VACUUM_INCREMENTAL {
+        return Ok(());
+    }
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+    conn.execute_batch("VACUUM;")?;
+    info!("storage: switched auto_vacuum {mode} -> incremental");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,6 +759,45 @@ mod tests {
         assert!(storage.delete_item(id1).unwrap());
         assert_eq!(storage.paste_stats(Some("com.example.editor")).unwrap().total, 0);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_db_gains_incremental_auto_vacuum_and_shrinks() {
+        let dir = std::env::temp_dir().join(format!("znonclip-vac-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("legacy.db");
+        {
+            // A pre-upgrade database: default auto_vacuum = NONE.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
+            let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+            assert_eq!(mode, 0);
+        }
+        let storage = Storage::open_path(&db).unwrap();
+        let mode: i64 = storage
+            .conn
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, AUTO_VACUUM_INCREMENTAL);
+
+        // ~4 MB of image blobs, then prune them all: page count must drop.
+        for n in 0..16 {
+            let mut item = sample_item(&format!("img{n}"), &format!("vh{n}"));
+            item.content_type = ContentType::Image;
+            item.content_image = Some(vec![n as u8; 256 * 1024]);
+            storage.insert_item(&item).unwrap();
+        }
+        let pages = |s: &Storage| -> i64 {
+            s.conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap()
+        };
+        let before = pages(&storage);
+        storage.prune(0, 0).unwrap();
+        let after = pages(&storage);
+        assert!(after < before / 4, "pages before={before} after={after}");
+
+        drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

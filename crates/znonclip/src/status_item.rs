@@ -19,7 +19,7 @@ use block2::RcBlock;
 use log::info;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{sel, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{sel, AnyThread, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSBezelStyle, NSBox, NSBoxType, NSButton, NSCellImagePosition, NSColor, NSControl,
     NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventMask, NSFont,
@@ -31,9 +31,9 @@ use objc2_app_kit::{
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{ns_string, NSData, NSPoint, NSRect, NSSize, NSString};
 
-use crate::clipboard::{ClipboardItem, History};
+use crate::clipboard::{ClipboardItem, ContentType, History};
 use crate::settings::{
     history_limit_label, poll_label, retention_label, HotkeyPreset, Settings,
     DEFAULT_HISTORY_ITEMS, HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
@@ -1366,7 +1366,14 @@ fn make_history_row(
     } else {
         item.content_type.sf_symbol()
     };
-    if let Some(image) = system_symbol(symbol_name, item.content_type.label(), 12.0) {
+    // Image rows show the stored thumbnail in place of the generic photo glyph.
+    // Select-mode checkboxes and the suggestion sparkle keep priority.
+    let thumb = if select_mode || suggestion.is_some() {
+        None
+    } else {
+        row_thumbnail(item)
+    };
+    if let Some(image) = thumb.or_else(|| system_symbol(symbol_name, item.content_type.label(), 12.0)) {
         button.setImage(Some(&image));
     }
     // Do not set contentTintColor here — it would recolor the title text as well.
@@ -1459,6 +1466,31 @@ fn make_history_row(
     }
 
     row
+}
+
+/// Row thumbnail edge, in points. The stored bitmap is up to 256 px, so this
+/// stays sharp on Retina.
+const ROW_THUMB: f64 = 24.0;
+
+/// Decode an image item's stored thumbnail, aspect-fit inside `ROW_THUMB`.
+fn row_thumbnail(item: &ClipboardItem) -> Option<Retained<NSImage>> {
+    if item.content_type != ContentType::Image {
+        return None;
+    }
+    let bytes = item.content_image.as_deref()?;
+    let data = NSData::with_bytes(bytes);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    let size = image.size();
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return None;
+    }
+    let scale = (ROW_THUMB / size.width).min(ROW_THUMB / size.height);
+    image.setSize(NSSize::new(
+        (size.width * scale).max(1.0),
+        (size.height * scale).max(1.0),
+    ));
+    image.setAccessibilityDescription(Some(ns_string!("Image")));
+    Some(image)
 }
 
 /// System SF Symbol sized for list UI (template rendering).

@@ -11,7 +11,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::AnyThread;
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSPasteboard, NSPasteboardTypeFileURL,
+    NSBitmapImageFileType, NSBitmapImageRep, NSCompositingOperation, NSDeviceRGBColorSpace,
+    NSGraphicsContext, NSImage, NSImageInterpolation, NSPasteboard, NSPasteboardTypeFileURL,
     NSPasteboardTypeHTML, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
     NSPasteboardTypeTIFF, NSPasteboardTypeURL, NSWorkspace,
 };
@@ -38,6 +39,10 @@ pub enum PollResult {
 
 /// Maximum thumbnail edge length in pixels.
 const THUMB_MAX: f64 = 256.0;
+
+/// Refuse to decode sources larger than this many pixels (drawing decodes the
+/// full bitmap; a 20k×20k paste would otherwise cost ~1.6 GB transiently).
+const THUMB_SOURCE_MAX_PIXELS: f64 = 60_000_000.0;
 
 /// Kind of clipboard payload (maps to storage `content_type`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -688,52 +693,96 @@ fn extract_image_thumbnail(pb: &NSPasteboard) -> Option<Vec<u8>> {
         .dataForType(unsafe { NSPasteboardTypePNG })
         .or_else(|| pb.dataForType(unsafe { NSPasteboardTypeTIFF }))?;
 
-    make_thumbnail(&data).or_else(|| {
-        warn!("thumbnail generation failed; storing capped raw image bytes");
-        let raw = data.to_vec();
-        if raw.len() > 256 * 1024 {
-            Some(raw[..256 * 1024].to_vec())
-        } else {
-            Some(raw)
-        }
-    })
+    let thumb = make_thumbnail(&data);
+    if thumb.is_none() {
+        // Never store truncated raw bytes: a cut-off PNG/TIFF is undecodable
+        // and would paste back as garbage.
+        warn!("thumbnail generation failed; image not recorded");
+    }
+    thumb
 }
 
-/// Resize to max 256×256 and encode as JPEG when possible, else TIFF.
+/// Largest pixel dimensions across the image's representations. `NSImage::size`
+/// is in points, so a 2x Retina capture reports half its real pixel size.
+fn source_pixel_size(image: &NSImage) -> NSSize {
+    let size = image.size();
+    let (mut pw, mut ph) = (0.0f64, 0.0f64);
+    for rep in image.representations().iter() {
+        pw = pw.max(rep.pixelsWide() as f64);
+        ph = ph.max(rep.pixelsHigh() as f64);
+    }
+    if pw <= 0.0 || ph <= 0.0 {
+        // Vector reps (PDF) report 0 pixels; fall back to point size.
+        return size;
+    }
+    NSSize::new(pw, ph)
+}
+
+/// Thumbnail target in pixels: fit within `THUMB_MAX`, never upscale.
+fn thumb_pixel_dims(src: NSSize) -> (isize, isize) {
+    let scale = (THUMB_MAX / src.width).min(THUMB_MAX / src.height).min(1.0);
+    let tw = (src.width * scale).round().clamp(1.0, THUMB_MAX) as isize;
+    let th = (src.height * scale).round().clamp(1.0, THUMB_MAX) as isize;
+    (tw, th)
+}
+
+/// Resize to max 256×256 **pixels** and encode as JPEG when possible, else TIFF.
+///
+/// Renders into an explicit pixel-sized bitmap rather than `NSImage::lockFocus`,
+/// whose backing store follows the screen scale (512×512 on Retina).
 fn make_thumbnail(data: &NSData) -> Option<Vec<u8>> {
     let image = NSImage::initWithData(NSImage::alloc(), data)?;
-    let size = image.size();
-    if size.width <= 0.0 || size.height <= 0.0 {
+    let src = source_pixel_size(&image);
+    if src.width <= 0.0 || src.height <= 0.0 {
+        return None;
+    }
+    if src.width * src.height > THUMB_SOURCE_MAX_PIXELS {
+        warn!(
+            "image {}x{} exceeds thumbnail source cap; skipped",
+            src.width, src.height
+        );
         return None;
     }
 
-    let scale = (THUMB_MAX / size.width)
-        .min(THUMB_MAX / size.height)
-        .min(1.0);
-    let tw = (size.width * scale).max(1.0);
-    let th = (size.height * scale).max(1.0);
-    let thumb_size = NSSize::new(tw, th);
+    let (tw, th) = thumb_pixel_dims(src);
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            tw,
+            th,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }?;
+    // 1 point == 1 pixel in this rep, independent of any display.
+    rep.setSize(NSSize::new(tw as f64, th as f64));
 
-    let thumb = NSImage::initWithSize(NSImage::alloc(), thumb_size);
-    #[allow(deprecated)]
+    let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&ctx));
+    ctx.setImageInterpolation(NSImageInterpolation::High);
+    image.drawInRect_fromRect_operation_fraction(
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(tw as f64, th as f64)),
+        NSRect::ZERO,
+        NSCompositingOperation::Copy,
+        1.0,
+    );
+    ctx.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+
+    let props = objc2_foundation::NSDictionary::<NSString, AnyObject>::new();
+    if let Some(jpeg) =
+        unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &props) }
     {
-        thumb.lockFocus();
-        image.drawInRect(NSRect::new(NSPoint::new(0.0, 0.0), thumb_size));
-        thumb.unlockFocus();
+        return Some(jpeg.to_vec());
     }
-
-    if let Some(tiff) = thumb.TIFFRepresentation() {
-        if let Some(rep) = NSBitmapImageRep::imageRepWithData(&tiff) {
-            let props = objc2_foundation::NSDictionary::<NSString, AnyObject>::new();
-            if let Some(jpeg) = unsafe {
-                rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &props)
-            } {
-                return Some(jpeg.to_vec());
-            }
-        }
-        return Some(tiff.to_vec());
-    }
-    None
+    rep.TIFFRepresentation().map(|t| t.to_vec())
 }
 
 fn file_preview(paths: &[String]) -> String {
@@ -790,3 +839,53 @@ fn _now_ms() -> u64 {
 
 #[allow(dead_code)]
 fn _retain_marker(_: &Retained<NSString>) {}
+
+#[cfg(test)]
+mod thumb_tests {
+    use super::*;
+
+    #[test]
+    fn thumb_dims_are_pixel_bounded() {
+        // 2x Retina full-screen capture (pixels, not points).
+        assert_eq!(thumb_pixel_dims(NSSize::new(5120.0, 2880.0)), (256, 144));
+        assert_eq!(thumb_pixel_dims(NSSize::new(1000.0, 4000.0)), (64, 256));
+        // Never upscale small images.
+        assert_eq!(thumb_pixel_dims(NSSize::new(40.0, 20.0)), (40, 20));
+        // Degenerate slivers keep at least one pixel.
+        assert_eq!(thumb_pixel_dims(NSSize::new(100000.0, 1.0)), (256, 1));
+    }
+
+    /// A 2x capture: 2560×1600 pixels tagged 144 DPI, so `NSImage::size` reports
+    /// 1280×800 points. The thumbnail must be bounded in pixels, not points.
+    #[test]
+    fn retina_capture_thumbnail_is_256px() {
+        let (pw, ph) = (2560isize, 1600isize);
+        let src = unsafe {
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                pw,
+                ph,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                0,
+                0,
+            )
+        }
+        .unwrap();
+        src.setSize(NSSize::new(pw as f64 / 2.0, ph as f64 / 2.0));
+        let props = objc2_foundation::NSDictionary::<NSString, AnyObject>::new();
+        let png = unsafe { src.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+            .unwrap();
+
+        let decoded = NSImage::initWithData(NSImage::alloc(), &png).unwrap();
+        assert_eq!(decoded.size().width, 1280.0, "fixture must be 2x");
+
+        let thumb = make_thumbnail(&png).expect("thumbnail");
+        let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(&thumb)).unwrap();
+        assert_eq!((rep.pixelsWide(), rep.pixelsHigh()), (256, 160));
+    }
+}
