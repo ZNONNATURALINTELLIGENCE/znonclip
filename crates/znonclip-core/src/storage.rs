@@ -23,6 +23,7 @@ impl ClipStore {
     /// Open (or create) the store at the given path.
     pub fn open(path: PathBuf) -> Result<Self> {
         let conn = Connection::open(path)?;
+        enable_incremental_auto_vacuum(&conn)?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS clips (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,8 +34,6 @@ impl ClipStore {
             )",
             [],
         )?;
-        // Enable auto-vacuum to keep the DB file small
-        conn.execute("PRAGMA auto_vacuum = INCREMENTAL", [])?;
         Ok(Self { conn })
     }
 
@@ -86,5 +85,74 @@ impl ClipStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(items)
+    }
+}
+
+/// `auto_vacuum` mode 2 (INCREMENTAL), so deleted rows can be given back to the OS.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// Switch the database to incremental auto-vacuum. SQLite only honours this
+/// before the first table exists, or after a full `VACUUM`; a store created
+/// without it gets that one `VACUUM` on its next open, and never again.
+fn enable_incremental_auto_vacuum(conn: &Connection) -> Result<()> {
+    let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+    if mode == AUTO_VACUUM_INCREMENTAL {
+        return Ok(());
+    }
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+    conn.execute_batch("VACUUM;")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("znonclip-core-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("clips.db")
+    }
+
+    fn auto_vacuum_mode(path: &PathBuf) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn new_store_uses_incremental_auto_vacuum() {
+        let path = temp_db("new");
+        ClipStore::open(path.clone()).unwrap();
+        assert_eq!(auto_vacuum_mode(&path), AUTO_VACUUM_INCREMENTAL);
+    }
+
+    #[test]
+    fn legacy_store_is_migrated_and_keeps_rows() {
+        let path = temp_db("legacy");
+        {
+            // A store as older builds created it: table first, auto_vacuum off.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE clips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT NOT NULL,
+                    content_type TEXT NOT NULL DEFAULT 'text',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO clips (content, created_at) VALUES ('kept', 1);",
+            )
+            .unwrap();
+        }
+        assert_eq!(auto_vacuum_mode(&path), 0);
+
+        let store = ClipStore::open(path.clone()).unwrap();
+        assert_eq!(auto_vacuum_mode(&path), AUTO_VACUUM_INCREMENTAL);
+        let items = store.recent(10).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].content, "kept");
     }
 }
