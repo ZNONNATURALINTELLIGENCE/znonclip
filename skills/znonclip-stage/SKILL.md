@@ -15,6 +15,11 @@ znonclip-agent stage myfile.rs
 
 # Check multiple files
 znonclip-agent stage src/*.rs
+
+# Check stdin content as if it were a file (NEW: --as flag)
+# Validates BEFORE writing - prevents broken code from touching the filesystem
+cat new_code.rs | znonclip-agent stage --as src/main.rs
+echo 'print("hello")' | znonclip-agent stage --as script.py
 ```
 
 ## Example Use Cases
@@ -27,14 +32,25 @@ znonclip-agent stage /tmp/new-feature.rs
 # Only if OK: cp /tmp/new-feature.rs src/
 ```
 
-### 2. Patch Review
+### 2. Stdin Pre-Write Check (NEW)
+Validate content BEFORE it touches the filesystem:
+```bash
+# Agent has new code in a variable, validates before writing
+cat > /tmp/proposed.rs << 'EOF'
+fn main() { println!("hello"); }
+EOF
+cat /tmp/proposed.rs | znonclip-agent stage --as src/main.rs
+# Only if OK: cp /tmp/proposed.rs src/main.rs
+```
+
+### 3. Patch Review
 Validate a patch before applying:
 ```bash
 # Extract patched files, stage them first
 znonclip-agent stage patched-file.py && git apply patch.diff
 ```
 
-### 3. CI Pre-Check
+### 4. CI Pre-Check
 Quick syntax gate in a pipeline:
 ```bash
 for f in $(git diff --name-only); do

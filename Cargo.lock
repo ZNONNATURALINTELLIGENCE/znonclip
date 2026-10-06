@@ -963,6 +963,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "rusqlite",
  "serde",
  "serde_json",
  "znonclip-core",
