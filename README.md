@@ -61,6 +61,16 @@ cargo build -p znonclip-core -p znonclip-cli -p znonclip-agent
 cargo build -p znonclip
 ```
 
+## Uninstalling
+
+[`scripts/uninstall.sh`](scripts/uninstall.sh) quits the app, removes launch-at-login (the LaunchAgent, including ones left by the older ClipPin / Clip Assistant names) and removes the installed binaries. Your clipboard history is kept unless you pass `--purge`.
+
+```bash
+scripts/uninstall.sh --dry-run   # show what it would do
+scripts/uninstall.sh             # uninstall, keep history
+scripts/uninstall.sh --purge     # also delete history, logs and preferences
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
