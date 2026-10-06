@@ -24,6 +24,11 @@ fn open_db() -> Result<Connection> {
     let path = db_path()?;
     let conn = Connection::open(&path)
         .with_context(|| format!("Failed to open snapshot DB at {}", path.display()))?;
+    // Snapshots are plaintext copies of the files: owner-only, like the slots.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     conn.execute(
         "CREATE TABLE IF NOT EXISTS snapshots (
             name TEXT NOT NULL,
@@ -71,10 +76,14 @@ pub fn run(args: &[String]) -> Result<()> {
             for file in &args[2..] {
                 let content = std::fs::read(file)
                     .with_context(|| format!("Failed to read {file}"))?;
+                // Store the absolute path, so rollback restores this file even
+                // when it runs from a different working directory.
+                let abs = std::fs::canonicalize(file)
+                    .with_context(|| format!("Failed to resolve {file}"))?;
                 conn.execute(
                     "INSERT OR REPLACE INTO snapshots (name, path, content, created_at)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![name, file, content, ts],
+                    params![name, abs.to_string_lossy(), content, ts],
                 )?;
                 count += 1;
             }
@@ -98,6 +107,14 @@ pub fn run(args: &[String]) -> Result<()> {
 
             if rows.is_empty() {
                 anyhow::bail!("No snapshot found with name '{name}'");
+            }
+            // Older snapshots stored paths as typed. A relative path would be
+            // restored against the current directory, maybe over another file.
+            if let Some((path, _)) = rows.iter().find(|(p, _)| !std::path::Path::new(p).is_absolute()) {
+                anyhow::bail!(
+                    "Snapshot '{name}' has a relative path ({path}) from an older version; \
+                     nothing restored. Delete it and snapshot again."
+                );
             }
 
             let mut count = 0;

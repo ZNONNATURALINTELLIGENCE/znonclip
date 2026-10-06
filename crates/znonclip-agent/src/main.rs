@@ -45,11 +45,14 @@ fn main() -> Result<()> {
     }
 }
 
-/// Base directory for agent-local state.
+/// Base directory for agent-local state. Owner-only (0700): it holds
+/// snapshot copies of files and slot payloads.
 fn agent_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let dir = directories::ProjectDirs::from("com", "znonclip", "ZnonClip")
         .map(|d| d.data_dir().join("agent"))
         .unwrap_or_else(|| PathBuf::from(".znonclip-agent"));
     std::fs::create_dir_all(&dir)?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     Ok(dir)
 }
