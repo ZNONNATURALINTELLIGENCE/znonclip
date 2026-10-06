@@ -490,7 +490,7 @@ define_class!(
                         status.set_status_notice(Some(&msg));
                     }
                 }
-                PollResult::Captured(mut item) => {
+                PollResult::Captured(mut item, full) => {
                     let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
                     let recheck = privacy::inspect_pasteboard(&pb);
                     if recheck.is_sensitive() {
@@ -522,6 +522,11 @@ define_class!(
                                     Ok((id, created_at)) => {
                                         item.id = id;
                                         item.created_at = created_at;
+                                        if let Some(ref full) = full {
+                                            if let Err(e) = storage.set_full_image(id, full) {
+                                                warn!("storing original image failed: {e}");
+                                            }
+                                        }
                                     }
                                     Err(e) => error!("failed to insert clipboard item: {e}"),
                                 }
@@ -1015,6 +1020,24 @@ impl ZnonClipAppDelegate {
         })
     }
 
+    /// The item with its original image (when kept) in place of the thumbnail,
+    /// so the expanded preview is sharp.
+    fn item_for_expanded(&self, id: u64) -> Option<crate::clipboard::ClipboardItem> {
+        let mut item = self.item_by_id(id)?;
+        if item.content_type == crate::clipboard::ContentType::Image {
+            if let Some(full) = self
+                .ivars()
+                .storage
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.full_image(id).ok().flatten())
+            {
+                item.content_image = Some(full.bytes);
+            }
+        }
+        Some(item)
+    }
+
     /// Anchor rect for a preview of `id`: its row if visible, else the floater.
     fn preview_anchor(&self, id: u64) -> Option<(objc2_foundation::NSRect, objc2_foundation::NSRect)> {
         let status = self.ivars().status.borrow();
@@ -1025,7 +1048,7 @@ impl ZnonClipAppDelegate {
     }
 
     fn toggle_expand(&self, id: u64) {
-        let Some(item) = self.item_by_id(id) else {
+        let Some(item) = self.item_for_expanded(id) else {
             return;
         };
         let Some((anchor, floater)) = self.preview_anchor(id) else {
@@ -1036,7 +1059,7 @@ impl ZnonClipAppDelegate {
     }
 
     fn follow_expanded(&self, id: u64) {
-        let (Some(item), Some((anchor, floater))) = (self.item_by_id(id), self.preview_anchor(id)) else {
+        let (Some(item), Some((anchor, floater))) = (self.item_for_expanded(id), self.preview_anchor(id)) else {
             return;
         };
         let target: *const AnyObject = (self as *const Self).cast();
@@ -1199,7 +1222,16 @@ impl ZnonClipAppDelegate {
 
         // Avoid re-ingesting our own write as a new history entry.
         self.ivars().poller.borrow_mut().ignore_next_change();
-        copy_item_to_pasteboard(&item);
+        let full = if item.content_type == crate::clipboard::ContentType::Image {
+            self.ivars()
+                .storage
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.full_image(id).ok().flatten())
+        } else {
+            None
+        };
+        copy_item_to_pasteboard(&item, full.as_ref());
         *self.ivars().clipboard_hash.borrow_mut() = Some(item.hash.clone());
 
         let target_bundle = self.target_bundle_id();

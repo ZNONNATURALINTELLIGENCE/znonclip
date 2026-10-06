@@ -38,7 +38,7 @@ const HOVER_TEXT_W: f64 = 320.0;
 const HOVER_TEXT_LINES: isize = 14;
 const HOVER_TEXT_CHARS: usize = 1200;
 
-const EXPANDED_IMAGE_MAX: f64 = 420.0;
+const EXPANDED_IMAGE_MAX: f64 = 560.0;
 const EXPANDED_W: f64 = 480.0;
 const EXPANDED_H: f64 = 400.0;
 const EXPANDED_TEXT_CHARS: usize = 200_000;

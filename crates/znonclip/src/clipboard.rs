@@ -34,7 +34,39 @@ pub enum PollResult {
     /// Change detected but no usable payload types.
     EmptyOrUnsupported,
     /// New item extracted (caller must persist / update UI).
-    Captured(ClipboardItem),
+    /// The full-resolution image, when there is one, travels separately so it
+    /// is written to storage but never held in the in-memory history.
+    Captured(ClipboardItem, Option<FullImage>),
+}
+
+/// Originals larger than this are not kept; paste falls back to the thumbnail.
+pub const FULL_IMAGE_MAX_BYTES: usize = 40 * 1024 * 1024;
+
+/// Pasteboard flavour of a stored original image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullImageKind {
+    Png,
+    Tiff,
+}
+
+impl FullImageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Tiff => "tiff",
+        }
+    }
+
+    pub fn from_str_lossy(s: &str) -> Self {
+        if s == "png" { Self::Png } else { Self::Tiff }
+    }
+}
+
+/// An image exactly as it was copied: pasted back at full quality.
+#[derive(Debug, Clone)]
+pub struct FullImage {
+    pub bytes: Vec<u8>,
+    pub kind: FullImageKind,
 }
 
 /// Maximum thumbnail edge length in pixels. 512 px is a sharp 256 pt preview
@@ -407,7 +439,10 @@ fn item_matches_query(item: &ClipboardItem, q_lower: &str) -> bool {
 }
 
 /// Write a history item back to the system pasteboard (for copy / re-paste).
-pub fn copy_item_to_pasteboard(item: &ClipboardItem) {
+///
+/// `full` is the stored original for image items; without it the thumbnail is
+/// pasted (older captures, or originals over the size cap).
+pub fn copy_item_to_pasteboard(item: &ClipboardItem, full: Option<&FullImage>) {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
 
@@ -428,13 +463,21 @@ pub fn copy_item_to_pasteboard(item: &ClipboardItem) {
             wrote = true;
         }
     }
-    if let Some(ref img) = item.content_image {
-        let data = NSData::with_bytes(img);
-        // Thumbnails may be JPEG; paste as TIFF if original type unknown.
-        if pb.setData_forType(Some(&data), unsafe { NSPasteboardTypePNG })
-            || pb.setData_forType(Some(&data), unsafe { NSPasteboardTypeTIFF })
-        {
+    if let Some(full) = full {
+        let data = NSData::with_bytes(&full.bytes);
+        let ty = match full.kind {
+            FullImageKind::Png => unsafe { NSPasteboardTypePNG },
+            FullImageKind::Tiff => unsafe { NSPasteboardTypeTIFF },
+        };
+        if pb.setData_forType(Some(&data), ty) {
             wrote = true;
+        }
+    } else if let Some(ref img) = item.content_image {
+        // Thumbnails are JPEG: re-encode as PNG so the declared type is true.
+        if let Some(png) = reencode_png(img) {
+            if pb.setData_forType(Some(&NSData::with_bytes(&png)), unsafe { NSPasteboardTypePNG }) {
+                wrote = true;
+            }
         }
     }
     if let Some(ref url) = item.content_url {
@@ -530,7 +573,12 @@ impl ClipboardPoller {
                     item.content_type,
                     truncate_for_log(&item.preview, 80)
                 );
-                PollResult::Captured(item)
+                let full = if item.content_type == ContentType::Image {
+                    extract_full_image(&pb)
+                } else {
+                    None
+                };
+                PollResult::Captured(item, full)
             }
             None => {
                 debug!("clipboard change ignored (empty / unsupported types)");
@@ -689,6 +737,19 @@ fn nsarray_of_strings(obj: &AnyObject) -> Option<Vec<String>> {
     }
 }
 
+/// The original PNG/TIFF bytes from the pasteboard, if within the size cap.
+fn extract_full_image(pb: &NSPasteboard) -> Option<FullImage> {
+    let (data, kind) = match pb.dataForType(unsafe { NSPasteboardTypePNG }) {
+        Some(d) => (d, FullImageKind::Png),
+        None => (pb.dataForType(unsafe { NSPasteboardTypeTIFF })?, FullImageKind::Tiff),
+    };
+    if data.len() > FULL_IMAGE_MAX_BYTES {
+        warn!("image original is {} bytes (cap {FULL_IMAGE_MAX_BYTES}); keeping thumbnail only", data.len());
+        return None;
+    }
+    Some(FullImage { bytes: data.to_vec(), kind })
+}
+
 fn extract_image_thumbnail(pb: &NSPasteboard) -> Option<Vec<u8>> {
     let data = pb
         .dataForType(unsafe { NSPasteboardTypePNG })
@@ -701,6 +762,14 @@ fn extract_image_thumbnail(pb: &NSPasteboard) -> Option<Vec<u8>> {
         warn!("thumbnail generation failed; image not recorded");
     }
     thumb
+}
+
+fn reencode_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(bytes))?;
+    let props = objc2_foundation::NSDictionary::<NSString, AnyObject>::new();
+    // SAFETY: PNG with empty properties is a valid request.
+    unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+        .map(|d| d.to_vec())
 }
 
 /// Largest pixel dimensions across the image's representations. `NSImage::size`

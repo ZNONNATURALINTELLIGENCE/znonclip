@@ -14,7 +14,7 @@ use log::{debug, info, warn};
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
-use crate::clipboard::{ClipboardItem, ContentType};
+use crate::clipboard::{ClipboardItem, ContentType, FullImage, FullImageKind};
 
 /// Default in-memory / popover cache size (most recent items).
 pub const DEFAULT_CACHE_LIMIT: usize = 100;
@@ -132,7 +132,48 @@ impl Storage {
                 ON paste_events (target_app);
             "#,
         )?;
+        // Full-resolution originals for image items (added 2026-10-06). Kept out
+        // of every list query: read only to paste or for the expanded preview.
+        let has_full: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('clipboard_items') WHERE name = 'content_image_full'")?
+            .exists([])?;
+        if !has_full {
+            self.conn.execute_batch(
+                "ALTER TABLE clipboard_items ADD COLUMN content_image_full BLOB;
+                 ALTER TABLE clipboard_items ADD COLUMN content_image_full_type TEXT;",
+            )?;
+            info!("storage: added content_image_full columns");
+        }
         Ok(())
+    }
+
+    /// Store the original image for item `id`.
+    pub fn set_full_image(&self, id: u64, full: &FullImage) -> Result<()> {
+        self.conn.execute(
+            "UPDATE clipboard_items SET content_image_full = ?1, content_image_full_type = ?2 WHERE id = ?3",
+            params![full.bytes, full.kind.as_str(), id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The original image for item `id`, if one was kept.
+    pub fn full_image(&self, id: u64) -> Result<Option<FullImage>> {
+        let row: Option<(Option<Vec<u8>>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT content_image_full, content_image_full_type FROM clipboard_items WHERE id = ?1",
+                params![id as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((Some(bytes), kind)) => Some(FullImage {
+                bytes,
+                kind: FullImageKind::from_str_lossy(kind.as_deref().unwrap_or("tiff")),
+            }),
+            _ => None,
+        })
     }
 
     // ── Insert / dedup ──────────────────────────────────────────────────────
@@ -759,6 +800,46 @@ mod tests {
         assert!(storage.delete_item(id1).unwrap());
         assert_eq!(storage.paste_stats(Some("com.example.editor")).unwrap().total, 0);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_image_round_trips_and_older_dbs_gain_the_column() {
+        let dir = std::env::temp_dir().join(format!("znonclip-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("legacy.db");
+        {
+            // Schema as it was before originals were kept.
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE clipboard_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, content_text TEXT, content_rtf BLOB,
+                    content_html TEXT, content_image BLOB, content_file_paths TEXT,
+                    content_url TEXT, source_app_bundle_id TEXT, content_type TEXT NOT NULL,
+                    is_pinned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+                    hash TEXT NOT NULL);",
+            )
+            .unwrap();
+        }
+        let storage = Storage::open_path(&db).unwrap();
+        let mut item = sample_item("shot", "fh1");
+        item.content_type = ContentType::Image;
+        item.content_image = Some(vec![1; 64]);
+        let (id, _) = storage.insert_item(&item).unwrap();
+        assert!(storage.full_image(id).unwrap().is_none(), "no original yet");
+
+        let original = FullImage { bytes: vec![7; 4096], kind: FullImageKind::Png };
+        storage.set_full_image(id, &original).unwrap();
+        let back = storage.full_image(id).unwrap().unwrap();
+        assert_eq!(back.bytes, original.bytes);
+        assert_eq!(back.kind, FullImageKind::Png);
+        // List queries stay lean: the thumbnail is what they carry.
+        assert_eq!(storage.get_item(id).unwrap().unwrap().content_image.unwrap().len(), 64);
+
+        // Re-opening must not try to add the column twice.
+        drop(storage);
+        assert!(Storage::open_path(&db).unwrap().full_image(id).unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
