@@ -1,8 +1,8 @@
-//! ZnonClip Core: shared storage, privacy filters, and secret scrubbing.
+//! ZnonClip Core: the CLI's clip store and the secret scrubber.
 //!
-//! This crate provides the foundational types and functions used by the
-//! Mac app, CLI, and agent tools. All crates share the same storage format
-//! and privacy guarantees.
+//! Used by `znonclip-cli` and `znonclip-agent`. The macOS app keeps its own
+//! history database (`com.znonclip.app/znonclip.db`); this crate's store is a
+//! separate file (`com.znonclip.ZnonClip/clips.db`).
 
 pub mod scrub;
 pub mod storage;

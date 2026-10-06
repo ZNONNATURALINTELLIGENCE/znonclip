@@ -662,6 +662,28 @@ define_class!(
         #[unsafe(method(performAutoPaste:))]
         fn perform_auto_paste(&self, _timer: Option<&AnyObject>) {
             *self.ivars().paste_timer.borrow_mut() = None;
+            // ⌘V goes to whatever is frontmost *now*. If focus moved since the
+            // floater opened (a notification, Spotlight, another window), do not
+            // paste there: the item may be a password. It stays on the clipboard.
+            if let Some(ref target) = *self.ivars().target_app.borrow() {
+                let front = NSWorkspace::sharedWorkspace().frontmostApplication();
+                let same = front
+                    .as_ref()
+                    .is_some_and(|f| f.processIdentifier() == target.processIdentifier());
+                if !same {
+                    let name = front
+                        .and_then(|f| f.localizedName())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "another app".into());
+                    warn!("auto-paste skipped: focus moved to {name}");
+                    if let Some(ref status) = *self.ivars().status.borrow() {
+                        status.set_status_notice(Some(&format!(
+                            "Copied, not pasted: focus moved to {name}"
+                        )));
+                    }
+                    return;
+                }
+            }
             match autopaste::paste_cmd_v_or_prompt() {
                 Ok(()) => {
                     if let Some(ref status) = *self.ivars().status.borrow() {
@@ -1009,6 +1031,9 @@ impl ZnonClipAppDelegate {
 
     /// Slide the row out, then delete it. Rows not on screen go straight away.
     fn delete_animated(&self, id: u64) {
+        // Leave the cache now, so a reload during the animation (a new copy, a
+        // search keystroke) cannot bring the row back. Storage commits after.
+        self.ivars().history.borrow_mut().remove(id);
         let row = self.ivars().status.borrow().as_ref().and_then(|s| s.row_view(id));
         match row {
             Some(row) => {

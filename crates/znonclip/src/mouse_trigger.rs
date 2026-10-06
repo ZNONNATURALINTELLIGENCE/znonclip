@@ -14,7 +14,8 @@
 
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use log::{info, warn};
@@ -74,8 +75,15 @@ const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 0x0010_0000;
 const K_CG_EVENT_FLAG_MASK_CONTROL: CGEventFlags = 0x0004_0000;
 
 static TAP: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-/// The tap swallowed a right-mouse-down: swallow its matching up too.
-static SWALLOW_UP: AtomicBool = AtomicBool::new(false);
+/// When the tap swallowed a right-mouse-down (ms since epoch; 0 = none). Its
+/// matching up is swallowed only within `SWALLOW_WINDOW_MS`, so an up that
+/// never arrived cannot make a later, ordinary right-click lose its up.
+static SWALLOWED_DOWN_AT: AtomicU64 = AtomicU64::new(0);
+const SWALLOW_WINDOW_MS: u64 = 1500;
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
 
 /// Keeps the fallback monitors alive.
 pub struct MouseTrigger {
@@ -193,13 +201,20 @@ extern "C" fn tap_callback(
             let option = flags & K_CG_EVENT_FLAG_MASK_ALTERNATE != 0;
             let other = flags & (K_CG_EVENT_FLAG_MASK_COMMAND | K_CG_EVENT_FLAG_MASK_CONTROL) != 0;
             if option && !other {
-                SWALLOW_UP.store(true, Ordering::SeqCst);
+                SWALLOWED_DOWN_AT.store(now_ms(), Ordering::SeqCst);
                 open_at_cursor();
                 return ptr::null_mut();
             }
             event
         }
-        K_CG_EVENT_RIGHT_MOUSE_UP if SWALLOW_UP.swap(false, Ordering::SeqCst) => ptr::null_mut(),
+        K_CG_EVENT_RIGHT_MOUSE_UP => {
+            let down = SWALLOWED_DOWN_AT.swap(0, Ordering::SeqCst);
+            if down != 0 && now_ms().saturating_sub(down) <= SWALLOW_WINDOW_MS {
+                ptr::null_mut()
+            } else {
+                event
+            }
+        }
         _ => event,
     }
 }

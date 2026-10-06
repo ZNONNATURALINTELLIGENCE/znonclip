@@ -12,9 +12,38 @@ use std::io::Write;
 use anyhow::{Context, Result};
 use znonclip_core::scrub_secrets;
 
-/// Rough token estimate: ~4 chars per token (standard heuristic).
+/// Rough token estimate: ~4 characters per token. Counted in characters,
+/// the same unit truncation uses, so non-ASCII text cannot overrun the budget.
 fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
+    text.chars().count().div_ceil(4)
+}
+
+/// Extra characters read past the budget so a secret straddling the cut is
+/// still whole when the scrubber sees it.
+const SCRUB_MARGIN_CHARS: usize = 4096;
+
+/// Read at most enough of `path` for `max_chars` characters (UTF-8 is at most
+/// 4 bytes a character), never the whole of a huge file. Returns the text and
+/// whether the file was longer.
+fn read_prefix(path: &str, max_chars: usize) -> Result<(String, bool)> {
+    use std::io::Read;
+    let max_bytes = max_chars.saturating_mul(4) as u64;
+    let file = std::fs::File::open(path).with_context(|| format!("Failed to read {path}"))?;
+    let mut buf = Vec::new();
+    file.take(max_bytes + 1).read_to_end(&mut buf)?;
+    let longer = buf.len() as u64 > max_bytes;
+    buf.truncate(max_bytes as usize);
+    // Drop a partial multi-byte character at the cut, then decode.
+    let text = match String::from_utf8(buf) {
+        Ok(t) => t,
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            let mut bytes = e.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).unwrap_or_default()
+        }
+    };
+    Ok((text, longer))
 }
 
 pub fn run(args: &[String]) -> Result<()> {
@@ -44,15 +73,15 @@ pub fn run(args: &[String]) -> Result<()> {
 fn export(files: &[String], budget: usize, out: &mut impl Write) -> Result<()> {
     let mut used = 0;
     for file in files {
-        let raw = std::fs::read_to_string(file)
-            .with_context(|| format!("Failed to read {file}"))?;
+        let remaining_chars = budget.saturating_sub(used).saturating_mul(4);
+        let (raw, longer) = read_prefix(file, remaining_chars + SCRUB_MARGIN_CHARS)?;
         let content = scrub_secrets(&raw);
         if content != raw {
             eprintln!("Redacted secrets in {file}");
         }
         let tokens = estimate_tokens(&content);
 
-        if used + tokens <= budget {
+        if !longer && used + tokens <= budget {
             writeln!(out, "=== {file} ({tokens} tokens) ===")?;
             writeln!(out, "{content}")?;
             used += tokens;
@@ -101,6 +130,20 @@ mod tests {
         let out = export_string(&format!("aws = {key}\n"), 2000);
         assert!(!out.contains(&key));
         assert!(out.contains("[REDACTED:aws-key]"));
+    }
+
+    #[test]
+    fn hyphenated_key_cut_by_the_budget_is_still_scrubbed() {
+        let key = format!("{}{}", ["sk", "proj-"].join("-"), "Zx9_".repeat(12));
+        let out = export_string(&format!("k={key} and more text after it"), 3);
+        assert!(!out.contains("sk-proj-Zx9"), "{out}");
+    }
+
+    #[test]
+    fn budget_counts_characters_not_bytes() {
+        // 40 four-byte characters = 10 tokens by characters (40 by bytes).
+        let out = export_string(&"🦀".repeat(40), 10);
+        assert!(!out.contains("truncated"), "{out}");
     }
 
     #[test]

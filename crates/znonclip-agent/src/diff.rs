@@ -11,29 +11,24 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-/// Read content from a slot: or file: specifier.
-/// Bare paths are treated as files. Prefix with `slot:` for IPC slots.
+/// Read content from a `slot:` or file specifier, with known secrets
+/// redacted: the output goes into agent transcripts.
 fn read_spec(spec: &str) -> Result<(String, String)> {
-    if let Some(slot) = spec.strip_prefix("slot:") {
-        // Reuse the slot path logic from ipc module
-        let safe: String = slot
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        if safe.is_empty() {
-            anyhow::bail!("Invalid slot name: {slot}");
-        }
-        let dir = crate::agent_dir()?.join("ipc-slots");
-        let path = dir.join(format!("{safe}.slot"));
+    let (label, content) = if let Some(slot) = spec.strip_prefix("slot:") {
+        let path = crate::ipc::slot_path(slot)?;
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read slot {slot}"))?;
-        Ok((format!("slot:{slot}"), content))
+        (format!("slot:{slot}"), content)
     } else {
         let content = std::fs::read_to_string(spec)
             .with_context(|| format!("Failed to read file {spec}"))?;
-        Ok((spec.to_string(), content))
-    }
+        (spec.to_string(), content)
+    };
+    Ok((label, znonclip_core::scrub_secrets(&content)))
 }
+
+/// The LCS table is (m+1) x (n+1) cells; refuse inputs that would need more.
+const MAX_TABLE_CELLS: usize = 16_000_000;
 
 /// A single diff operation.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,11 +47,8 @@ fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<Op> {
     let m = old_lines.len();
     let n = new_lines.len();
 
-    // LCS DP table: lcs[i][j] = LCS length of old[i..] and new[j..]
-    // Use a 2-row rolling array for memory efficiency
-    let mut prev = vec![0usize; n + 1];
-    let mut curr = vec![0usize; n + 1];
-    // Store the full table for backtracking (m*n, fine for reasonable files)
+    // LCS DP table: table[i][j] = LCS length of old[i..] and new[j..]. The
+    // full table is kept for backtracking; `run` caps its size.
     let mut table = vec![vec![0usize; n + 1]; m + 1];
 
     for i in (0..m).rev() {
@@ -67,8 +59,6 @@ fn compute_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<Op> {
                 table[i][j] = table[i + 1][j].max(table[i][j + 1]);
             }
         }
-        // Keep prev/curr updated (not strictly needed with full table, but harmless)
-        std::mem::swap(&mut prev, &mut curr);
     }
 
     // Backtrack to produce ops
@@ -112,6 +102,8 @@ struct Hunk {
 fn to_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
     let mut hunks = Vec::new();
     let mut i = 0;
+    // End of the previous hunk: leading context never repeats its lines.
+    let mut last_end = 0;
 
     while i < ops.len() {
         // Skip over Same ops until we find a change
@@ -121,7 +113,7 @@ fn to_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
         }
 
         // Found a change at i. Expand backward for context.
-        let hunk_start = i.saturating_sub(context);
+        let hunk_start = i.saturating_sub(context).max(last_end);
 
         // Find the end: continue until we have `context` trailing Same ops
         // or we hit the end.
@@ -132,8 +124,8 @@ fn to_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
                 Op::Same(_) => {
                     trailing_same += 1;
                     if trailing_same > context {
-                        // We've collected enough trailing context; back up
-                        j -= trailing_same - context;
+                        // ops[j] is one Same past the context: end the hunk
+                        // before it, keeping exactly `context` trailing lines.
                         break;
                     }
                 }
@@ -189,8 +181,7 @@ fn to_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
         });
 
         i = j;
-        // Skip the trailing context we already consumed as part of this hunk
-        // (the next iteration will skip Same ops naturally)
+        last_end = j;
     }
 
     hunks
@@ -209,6 +200,14 @@ pub fn run(args: &[String]) -> Result<()> {
 
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
+    let cells = (old_lines.len() + 1).saturating_mul(new_lines.len() + 1);
+    if cells > MAX_TABLE_CELLS {
+        anyhow::bail!(
+            "inputs too large to diff in memory ({} x {} lines); use git diff",
+            old_lines.len(),
+            new_lines.len()
+        );
+    }
 
     if old_lines == new_lines {
         println!("No differences between {old_label} and {new_label}.");
@@ -245,4 +244,44 @@ pub fn run(args: &[String]) -> Result<()> {
 #[allow(dead_code)]
 fn _unused_pathbuf() -> PathBuf {
     PathBuf::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    #[test]
+    fn hunks_keep_exactly_three_context_lines() {
+        let old = lines(20);
+        let mut new = old.clone();
+        new[10] = "changed".into();
+        let o: Vec<&str> = old.iter().map(|s| s.as_str()).collect();
+        let n: Vec<&str> = new.iter().map(|s| s.as_str()).collect();
+        let hunks = to_hunks(&compute_diff(&o, &n), 3);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        // 3 before + 1 deletion + 1 addition + 3 after.
+        assert_eq!(h.lines.len(), 8, "{:?}", h.lines);
+        assert_eq!((h.old_start, h.old_len, h.new_start, h.new_len), (8, 7, 8, 7));
+    }
+
+    #[test]
+    fn close_hunks_do_not_repeat_lines() {
+        let old = lines(20);
+        let mut new = old.clone();
+        new[5] = "a".into();
+        new[9] = "b".into();
+        let o: Vec<&str> = old.iter().map(|s| s.as_str()).collect();
+        let n: Vec<&str> = new.iter().map(|s| s.as_str()).collect();
+        let hunks = to_hunks(&compute_diff(&o, &n), 3);
+        let shown: Vec<&String> = hunks.iter().flat_map(|h| h.lines.iter()).collect();
+        let context: Vec<&&String> = shown.iter().filter(|l| l.starts_with(' ')).collect();
+        let mut dedup = context.clone();
+        dedup.dedup();
+        assert_eq!(context.len(), dedup.len(), "context repeated: {shown:?}");
+    }
 }

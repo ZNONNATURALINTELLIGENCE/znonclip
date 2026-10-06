@@ -453,7 +453,8 @@ impl StatusItemController {
             .map(|s| s.visibleFrame())
         {
             w = w.min(v.size.width - 12.0);
-            h = h.min(v.size.height - 12.0);
+            // Grows downward from a fixed top: limit to the room below it.
+            h = h.min(v.size.height - 12.0).min(top - v.origin.y - 6.0);
             x = x.min(v.origin.x + v.size.width - w - 6.0).max(v.origin.x + 6.0);
         }
         self.panel

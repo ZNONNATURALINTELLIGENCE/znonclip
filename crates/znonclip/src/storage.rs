@@ -66,7 +66,9 @@ impl Storage {
         let dir = app_support_dir()?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(DB_FILE_NAME);
-        Self::open_path(&path)
+        let storage = Self::open_path(&path)?;
+        restrict_permissions(&dir, &path);
+        Ok(storage)
     }
 
     /// Open a database at an explicit path (useful for tests).
@@ -729,6 +731,21 @@ fn enable_incremental_auto_vacuum(conn: &Connection) -> Result<()> {
     conn.execute_batch("VACUUM;")?;
     info!("storage: switched auto_vacuum {mode} -> incremental");
     Ok(())
+}
+
+/// Clipboard history can hold anything you copied: keep it owner-only.
+/// SQLite gives its -wal/-shm files the database file's mode.
+fn restrict_permissions(dir: &Path, db: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = db.as_os_str().to_owned();
+        p.push(suffix);
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -43,7 +43,10 @@ impl ClipStore {
             .map(|d| d.data_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
         std::fs::create_dir_all(&dir)?;
-        Self::open(dir.join("clips.db"))
+        let db = dir.join("clips.db");
+        let store = Self::open(db.clone())?;
+        restrict_permissions(&dir, &db);
+        Ok(store)
     }
 
     /// Insert a new clip, returning its ID.
@@ -67,6 +70,14 @@ impl ClipStore {
         Ok(())
     }
 
+    /// How many clips are pinned.
+    pub fn pinned_count(&self) -> Result<usize> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM clips WHERE pinned = 1", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     /// Get recent clips, pinned first.
     pub fn recent(&self, limit: usize) -> Result<Vec<ClipItem>> {
         let mut stmt = self.conn.prepare(
@@ -85,6 +96,21 @@ impl ClipStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(items)
+    }
+}
+
+/// Clipboard history can hold anything you copied: keep it owner-only.
+/// SQLite gives its -wal/-shm files the database file's mode.
+pub fn restrict_permissions(dir: &std::path::Path, db: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = db.as_os_str().to_owned();
+        p.push(suffix);
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 

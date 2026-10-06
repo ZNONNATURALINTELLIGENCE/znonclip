@@ -140,6 +140,15 @@ define_class!(
             preview::show_hover(mtm, &self.ivars().item, self.screen_rect(), win.frame());
         }
 
+        /// Removed by a re-render: drop any pending hover preview with it.
+        #[unsafe(method(viewDidMoveToWindow))]
+        fn view_did_move_to_window(&self) {
+            if self.window().is_none() {
+                self.ivars().hovering.set(false);
+                self.cancel_pending_preview();
+            }
+        }
+
         /// The first click on an inactive floater should act, not just focus.
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {

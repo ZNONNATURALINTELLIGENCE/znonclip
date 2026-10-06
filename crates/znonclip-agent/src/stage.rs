@@ -1,7 +1,10 @@
-//! Patch-staging gate: syntax-check code before it touches the filesystem.
+//! Patch-staging check: confirm a buffer or file parses before you write it.
 //!
-//! Stage a patch, verify it parses, then apply. This prevents
-//! broken code from ever landing in the working tree.
+//! Supported: Rust (`rustc --emit=metadata`, so it is type-checked as a
+//! standalone crate and files that rely on sibling modules fail), Python
+//! (`ast.parse`, nothing written), JavaScript (`node --check`). Any other
+//! file type is an error, never a silent pass. This command only checks; it
+//! does not write or apply anything.
 
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -120,8 +123,13 @@ fn check_file_inner(path: &str, ext: &str) -> Result<bool> {
                 .output()
                 .context("Failed to run rustc")?
         }
+        // ast.parse writes no __pycache__ next to the file, unlike py_compile.
         "py" => Command::new("python3")
-            .args(["-m", "py_compile", path])
+            .args([
+                "-c",
+                "import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8').read(), sys.argv[1])",
+                path,
+            ])
             .output()
             .context("Failed to run python3")?,
         "js" | "mjs" => Command::new("node")
@@ -129,8 +137,8 @@ fn check_file_inner(path: &str, ext: &str) -> Result<bool> {
             .output()
             .context("Failed to run node")?,
         _ => {
-            println!("{path}: no checker for .{ext}, skipping");
-            return Ok(true);
+            eprintln!("{path}: no checker for .{ext} (supported: rs, py, js, mjs)");
+            return Ok(false);
         }
     };
 
