@@ -7,6 +7,8 @@ description: Token-budgeted context exporter for ZnonClip. Export files truncate
 
 Exports file contents truncated to fit within a specified token budget (~4 chars/token heuristic). Ensures subagent prompts stay lean.
 
+Every file is run through the secret scrubber (`znonclip-cli scrub`) before it is budgeted or truncated, so API keys and tokens are replaced with `[REDACTED:<type>]` in the output. A note on stderr names each file that had something redacted. The scrubber is pattern-based and will miss key shapes it does not know about, so do not export files you know hold secrets.
+
 ## Commands
 
 ```bash
