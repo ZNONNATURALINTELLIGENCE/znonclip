@@ -52,12 +52,15 @@ pub struct RowState<'a> {
     pub cursor: bool,
     /// The ranker's reason, if this row is its suggestion.
     pub suggestion: Option<&'a str>,
+    /// Unlock mode: a click toggles pin membership instead of pasting.
+    pub pin_edit: bool,
 }
 
 pub struct RowIvars {
     item: ClipboardItem,
     target: Retained<AnyObject>,
     select_mode: bool,
+    pin_edit: bool,
     cursor: bool,
     hovering: Cell<bool>,
     hover_bg: RefCell<Option<Retained<NSBox>>>,
@@ -164,7 +167,9 @@ define_class!(
             }
             self.cancel_pending_preview();
             preview::hide_hover();
-            let action = if self.ivars().select_mode {
+            let action = if self.ivars().pin_edit {
+                sel!(pinHistoryItem:)
+            } else if self.ivars().select_mode {
                 sel!(toggleItemSelection:)
             } else {
                 sel!(copyHistoryItem:)
@@ -277,6 +282,7 @@ pub fn make_row(
         item: item.clone(),
         target: target.retain(),
         select_mode: state.select_mode,
+        pin_edit: state.pin_edit,
         cursor: state.cursor,
         hovering: Cell::new(false),
         hover_bg: RefCell::new(None),
@@ -421,7 +427,8 @@ fn action_strip(mtm: MainThreadMarker, item: &ClipboardItem, target: &AnyObject)
             if pinned { "pin.fill" } else { "pin" },
             if pinned { "Unpin (⌘P)" } else { "Pin (⌘P)" },
             sel!(pinHistoryItem:),
-            if pinned { theme::neon_pin() } else { theme::with_alpha(&theme::neon_pin(), 0.8) },
+            // Violet means "pinned": an unpinned row's pin stays neutral.
+            if pinned { theme::neon_pin() } else { NSColor::secondaryLabelColor() },
         ),
         (
             "arrow.up.left.and.arrow.down.right",

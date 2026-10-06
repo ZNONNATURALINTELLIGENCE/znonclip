@@ -14,6 +14,61 @@ const KEY_HOTKEY: &str = "hotkey_preset";
 const KEY_LAUNCH_AT_LOGIN: &str = "launch_at_login";
 const KEY_FLOAT_PANEL: &str = "float_panel";
 const KEY_UI_SCALE: &str = "ui_scale";
+const KEY_VIEW_MODE: &str = "view_mode";
+
+/// How the history list is laid out. Stack is the original single column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Stack,
+    /// Pinned in the left column, recents in the right.
+    Columns,
+    /// One horizontal row, pinned first, then recents.
+    Strip,
+}
+
+impl ViewMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stack => "stack",
+            Self::Columns => "columns",
+            Self::Strip => "strip",
+        }
+    }
+
+    /// Short toolbar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stack => "Stack",
+            Self::Columns => "2-col",
+            Self::Strip => "Strip",
+        }
+    }
+
+    pub fn notice(self) -> &'static str {
+        match self {
+            Self::Stack => "Layout: stack (pinned, then recent)",
+            Self::Columns => "Layout: two columns (pinned | recent)",
+            Self::Strip => "Layout: horizontal strip",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "columns" | "column" | "2-col" | "2col" => Self::Columns,
+            "strip" | "horizontal" => Self::Strip,
+            _ => Self::Stack,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Stack => Self::Columns,
+            Self::Columns => Self::Strip,
+            Self::Strip => Self::Stack,
+        }
+    }
+}
 
 /// Preset global hotkey combinations (v1 — dropdown, not free-form recorder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -103,6 +158,8 @@ pub struct Settings {
     pub float_panel: bool,
     /// Zoom of the floater and preview (⌘+ / ⌘− / ⌘0). 1.0 = 100%.
     pub ui_scale: f64,
+    /// History layout. Stack until the user cycles it.
+    pub view_mode: ViewMode,
 }
 
 impl Default for Settings {
@@ -118,6 +175,7 @@ impl Default for Settings {
             hotkey: HotkeyPreset::default(),
             float_panel: true,
             ui_scale: 1.0,
+            view_mode: ViewMode::Stack,
         }
     }
 }
@@ -195,6 +253,9 @@ impl Settings {
                 s.ui_scale = x.clamp(UI_SCALE_STEPS[0], UI_SCALE_STEPS[UI_SCALE_STEPS.len() - 1]);
             }
         }
+        if let Ok(Some(v)) = storage.get_setting(KEY_VIEW_MODE) {
+            s.view_mode = ViewMode::from_str(&v);
+        }
 
         info!(
             "settings loaded (poll={}ms, retention={}d, limit={}, auto_paste={}, hotkey={}, login={})",
@@ -222,6 +283,7 @@ impl Settings {
         );
         self.save_key(storage, KEY_FLOAT_PANEL, if self.float_panel { "1" } else { "0" });
         self.save_key(storage, KEY_UI_SCALE, &format!("{:.2}", self.ui_scale));
+        self.save_key(storage, KEY_VIEW_MODE, self.view_mode.as_str());
     }
 
     /// Persist auto-paste flag.
@@ -309,5 +371,16 @@ mod zoom_tests {
         // Off-grid values snap to the next step in that direction.
         assert_eq!(next_ui_scale(1.2, 1), 1.25);
         assert_eq!(next_ui_scale(1.2, -1), 1.1);
+    }
+
+    #[test]
+    fn view_mode_cycles_and_unknown_stays_stack() {
+        assert_eq!(ViewMode::Stack.next(), ViewMode::Columns);
+        assert_eq!(ViewMode::Columns.next(), ViewMode::Strip);
+        assert_eq!(ViewMode::Strip.next(), ViewMode::Stack);
+        assert_eq!(ViewMode::from_str("2-col"), ViewMode::Columns);
+        assert_eq!(ViewMode::from_str("horizontal"), ViewMode::Strip);
+        assert_eq!(ViewMode::from_str("nope"), ViewMode::Stack);
+        assert_eq!(ViewMode::default().as_str(), "stack");
     }
 }

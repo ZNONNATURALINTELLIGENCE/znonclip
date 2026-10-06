@@ -82,11 +82,19 @@ static MNEMONIC_LABEL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)mnemonic|seed\s+phrase|recovery\s+phrase|secret\s+phrase")
         .expect("label pattern compiles")
 });
-static WORDS_24: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:[a-z]{3,8}\s+){23}[a-z]{3,8}\b").expect("24-word pattern compiles")
-});
-static WORDS_12: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:[a-z]{3,8}\s+){11}[a-z]{3,8}\b").expect("12-word pattern compiles")
+/// BIP-39 lengths, longest first, any letter case. A shorter pattern tried
+/// first would keep the tail of a 15-, 18- or 21-word phrase.
+static WORD_RUNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [24usize, 21, 18, 15, 12]
+        .into_iter()
+        .map(|n| {
+            Regex::new(&format!(
+                r"(?i)\b(?:[a-z]{{3,8}}\s+){{{}}}[a-z]{{3,8}}\b",
+                n - 1
+            ))
+            .expect("word-run pattern compiles")
+        })
+        .collect()
 });
 const LABEL_REACH: usize = 80;
 
@@ -118,24 +126,25 @@ fn redact(c: &Captures, r: &Rule) -> String {
     format!("{}[REDACTED:{}]{}", &w[..start], r.label, &w[end..])
 }
 
-/// Redact 24- and 12-word lowercase runs that start within `LABEL_REACH`
-/// after a seed-phrase label, or end within it before one. Each label claims
-/// at most one run, the search is anchored outside the label (so its own words
-/// never join the run), and all spans come from the original text.
+/// Redact a labelled 12-, 15-, 18-, 21- or 24-word run (any letter case)
+/// that starts within `LABEL_REACH` after a seed-phrase label, or ends within
+/// it before one. Each label claims at most one run, the search is anchored
+/// outside the label (so its own words never join the run), and all spans
+/// come from the original text. Unlabelled word runs are left alone.
 fn scrub_mnemonics(text: &str) -> String {
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for label in MNEMONIC_LABEL.find_iter(text) {
         let (ls, le) = (label.start(), label.end());
-        let after = [&*WORDS_24, &*WORDS_12].into_iter().find_map(|re| {
+        let after = WORD_RUNS.iter().find_map(|re| {
             re.find(&text[le..])
                 .filter(|m| m.start() <= LABEL_REACH)
                 .map(|m| (le + m.start(), le + m.end()))
         });
         let before = || {
-            [&*WORDS_24, &*WORDS_12].into_iter().find_map(|re| {
+            WORD_RUNS.iter().find_map(|re| {
                 re.find_iter(&text[..ls])
                     .last()
-                    .filter(|m| ls - m.end() <= LABEL_REACH)
+                    .filter(|m| ls.saturating_sub(m.end()) <= LABEL_REACH)
                     .map(|m| (m.start(), m.end()))
             })
         };
@@ -271,6 +280,33 @@ mod tests {
         let prose = "then the team went over the plan again with fresh eyes and more coffee";
         let out = scrub_secrets(&format!("mnemonic: {seed}. {prose}"));
         assert!(out.ends_with(prose), "{out}");
+    }
+
+    fn phrase(n: usize) -> String {
+        const BANK: [&str; 24] = [
+            "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract",
+            "absurd", "abuse", "access", "accident", "account", "accuse", "achieve", "acid",
+            "acoustic", "acquire", "across", "act", "action", "actor", "actress", "actual",
+        ];
+        BANK[..n].join(" ")
+    }
+
+    #[test]
+    fn labelled_mnemonics_cover_every_bip39_length_and_any_case() {
+        for n in [12, 15, 18, 21, 24] {
+            let words = phrase(n);
+            let out = scrub_secrets(&format!("mnemonic: {words}"));
+            assert_eq!(
+                out, "mnemonic: [REDACTED:seed-phrase]",
+                "{n} words left a tail: {out}"
+            );
+        }
+        let upper = phrase(12).to_uppercase();
+        let out = scrub_secrets(&format!("Seed phrase: {upper}"));
+        assert_eq!(out, "Seed phrase: [REDACTED:seed-phrase]", "{out}");
+        // No label: a word run is ordinary prose, including a longer or uppercase one.
+        assert!(unchanged(&phrase(15)));
+        assert!(unchanged(&upper));
     }
 
     #[test]

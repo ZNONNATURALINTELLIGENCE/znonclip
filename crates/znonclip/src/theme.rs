@@ -168,6 +168,23 @@ pub fn animate(duration: f64, changes: impl Fn() + 'static, done: Option<Box<dyn
     NSAnimationContext::runAnimationGroup_completionHandler(&changes, done.as_deref());
 }
 
+/// One horizontal nudge and back. Fired once when pin-edit or multi-select opens.
+pub fn jitter(view: &NSView) {
+    let v = view.retain();
+    let home = view.frame();
+    let mut nudged = home;
+    nudged.origin.x += 5.0;
+    let back = v.clone();
+    animate(
+        0.07,
+        move || v.animator().setFrame(nudged),
+        Some(Box::new(move || {
+            let back = back.clone();
+            animate(0.1, move || back.animator().setFrame(home), None);
+        })),
+    );
+}
+
 /// Fade a view's alpha to `to`.
 pub fn fade(view: &NSView, to: f64, duration: f64) {
     let v = view.retain();

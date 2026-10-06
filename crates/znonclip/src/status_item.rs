@@ -35,9 +35,10 @@ use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
 
 use crate::clipboard::{ClipboardItem, History};
 use crate::row::{self, RowView};
+use crate::settings::MAX_PINNED;
 use crate::theme;
 use crate::settings::{
-    history_limit_label, poll_label, retention_label, HotkeyPreset, Settings,
+    history_limit_label, poll_label, retention_label, HotkeyPreset, Settings, ViewMode,
     DEFAULT_HISTORY_ITEMS, HISTORY_LIMIT_OPTIONS, POLL_INTERVAL_OPTIONS, RETENTION_DAY_OPTIONS,
 };
 
@@ -58,6 +59,8 @@ const STATUS_H: f64 = 20.0;
 const PAD: f64 = 12.0;
 const SECTION_H: f64 = 18.0;
 const SEP_H: f64 = 1.0;
+/// Height of the "no pins yet" hint line.
+const HINT_H: f64 = 26.0;
 const ROW_GAP: f64 = 3.0;
 
 /// Feedback flash after an action lands on a row.
@@ -101,6 +104,10 @@ pub struct StatusItemController {
     pub status_label: Retained<NSTextField>,
     /// Compact action buttons (right side of history toolbar).
     pub select_button: Retained<NSButton>,
+    /// Cycles Stack → two columns → horizontal strip.
+    pub view_button: Retained<NSButton>,
+    /// Pin icon: unlock (jitter, click a row to pin or unpin) and lock again.
+    pub pin_edit_button: Retained<NSButton>,
     pub delete_selected_button: Retained<NSButton>,
     pub clear_history_button: Retained<NSButton>,
     pub cancel_select_button: Retained<NSButton>,
@@ -111,6 +118,14 @@ pub struct StatusItemController {
     settings_visible: Cell<bool>,
     /// Multi-select mode for bulk delete.
     select_mode: Cell<bool>,
+    /// Samsung unlock: checkboxes show pin membership and a click toggles it.
+    pin_edit: Cell<bool>,
+    /// History layout. Stack until the user cycles it.
+    view_mode: Cell<ViewMode>,
+    /// Consumed by the next render: shake each row once, then clear.
+    jitter_pending: Cell<bool>,
+    /// Recent slots (the history limit setting), shown as "RECENT · n/limit".
+    recent_limit: Cell<usize>,
     selected_ids: RefCell<HashSet<u64>>,
     /// Keyboard cursor (Enter pastes it). Seeded from the ranker's prediction.
     highlight_id: Cell<Option<u64>>,
@@ -218,6 +233,8 @@ impl StatusItemController {
             empty_label: built.empty_label,
             status_label: built.status_label,
             select_button: built.select_button,
+            view_button: built.view_button,
+            pin_edit_button: built.pin_edit_button,
             delete_selected_button: built.delete_selected_button,
             clear_history_button: built.clear_history_button,
             cancel_select_button: built.cancel_select_button,
@@ -225,6 +242,10 @@ impl StatusItemController {
             flash: Cell::new(None),
             settings_visible: Cell::new(false),
             select_mode: Cell::new(false),
+            pin_edit: Cell::new(false),
+            view_mode: Cell::new(ViewMode::Stack),
+            jitter_pending: Cell::new(false),
+            recent_limit: Cell::new(crate::settings::DEFAULT_HISTORY_ITEMS),
             selected_ids: RefCell::new(HashSet::new()),
             highlight_id: Cell::new(None),
             suggestion: RefCell::new(None),
@@ -271,6 +292,12 @@ impl StatusItemController {
 
             self.select_button.setTarget(Some(target));
             self.select_button.setAction(Some(sel!(toggleSelectMode:)));
+
+            self.view_button.setTarget(Some(target));
+            self.view_button.setAction(Some(sel!(cycleViewMode:)));
+
+            self.pin_edit_button.setTarget(Some(target));
+            self.pin_edit_button.setAction(Some(sel!(togglePinEdit:)));
 
             self.delete_selected_button.setTarget(Some(target));
             self.delete_selected_button
@@ -327,6 +354,16 @@ impl StatusItemController {
         self.select_mode.get()
     }
 
+    pub fn is_pin_edit(&self) -> bool {
+        self.pin_edit.get()
+    }
+
+    pub fn set_view_mode(&self, mode: ViewMode) {
+        self.view_mode.set(mode);
+        self.view_button.setTitle(&NSString::from_str(mode.label()));
+        self.scroll_view.setHasHorizontalScroller(mode == ViewMode::Strip);
+    }
+
     pub fn selected_ids(&self) -> Vec<u64> {
         self.selected_ids.borrow().iter().copied().collect()
     }
@@ -336,10 +373,35 @@ impl StatusItemController {
     }
 
     /// Enter/exit multi-select mode (clears selection when leaving).
+    /// Turning it on shakes the rows once on the next render.
     pub fn set_select_mode(&self, on: bool) {
+        let was = self.select_mode.get();
+        if on && self.pin_edit.get() {
+            self.pin_edit.set(false);
+        }
         self.select_mode.set(on);
         if !on {
             self.selected_ids.borrow_mut().clear();
+            self.jitter_pending.set(false);
+        } else if !was {
+            self.jitter_pending.set(true);
+        }
+        self.refresh_toolbar_mode();
+    }
+
+    /// Unlock (click a row to pin or unpin) or lock. Turning it on shakes once.
+    pub fn set_pin_edit(&self, on: bool) {
+        let was = self.pin_edit.get();
+        if on && self.select_mode.get() {
+            self.select_mode.set(false);
+            self.selected_ids.borrow_mut().clear();
+        }
+        self.pin_edit.set(on);
+        if on && !was {
+            self.jitter_pending.set(true);
+        }
+        if !on {
+            self.jitter_pending.set(false);
         }
         self.refresh_toolbar_mode();
     }
@@ -373,6 +435,27 @@ impl StatusItemController {
         self.auto_paste_checkbox.setHidden(select);
         self.select_button.setHidden(select);
         self.clear_history_button.setHidden(select);
+        // The delete cluster needs the left side of a narrow floater.
+        self.view_button.setHidden(select);
+        self.pin_edit_button.setHidden(select);
+        if let Some(img) = system_symbol(
+            if self.pin_edit.get() { "pin.fill" } else { "pin" },
+            "Pins",
+            13.0,
+        ) {
+            self.pin_edit_button.setImage(Some(&img));
+        }
+        let pin_tint: Retained<NSColor> = if self.pin_edit.get() {
+            theme::neon_pin()
+        } else {
+            NSColor::secondaryLabelColor()
+        };
+        self.pin_edit_button.setContentTintColor(Some(&pin_tint));
+        self.pin_edit_button.setToolTip(Some(if self.pin_edit.get() {
+            ns_string!("Lock pins (⌃⌘L)")
+        } else {
+            ns_string!("Unlock pins: rows shake, click a row to pin or unpin (⌃⌘U)")
+        }));
 
         self.delete_selected_button.setHidden(!select);
         self.cancel_select_button.setHidden(!select);
@@ -393,6 +476,7 @@ impl StatusItemController {
 
     /// Apply current settings values to UI controls.
     pub fn apply_settings_ui(&self, settings: &Settings) {
+        self.recent_limit.set(settings.history_limit);
         self.set_auto_paste_checked(settings.auto_paste);
         self.set_launch_at_login_checked(settings.launch_at_login);
         self.set_float_on_top(settings.float_panel);
@@ -406,6 +490,7 @@ impl StatusItemController {
             .selectItemAtIndex(settings.hotkey.index() as isize);
         self.hotkey_hint
             .setStringValue(&NSString::from_str(settings.hotkey.display()));
+        self.set_view_mode(settings.view_mode);
     }
 
     /// Apply "Float on top": window level and whether outside clicks close it.
@@ -722,100 +807,195 @@ impl StatusItemController {
 
         let pinned: Vec<&ClipboardItem> = items.iter().filter(|i| i.is_pinned).collect();
         let recent: Vec<&ClipboardItem> = items.iter().filter(|i| !i.is_pinned).collect();
+        let mode = self.view_mode.get();
+        self.scroll_view.setHasHorizontalScroller(mode == ViewMode::Strip);
 
-        // On-screen order drives arrow keys; a stale cursor falls back to the top row.
+        // On-screen order drives arrow keys: pinned, then recent, top to bottom
+        // (left to right in the strip). A stale cursor falls back to the first row.
         let order: Vec<u64> = pinned.iter().chain(recent.iter()).map(|i| i.id).collect();
         if !self.highlight_id.get().is_some_and(|id| order.contains(&id)) {
             self.highlight_id.set(order.first().copied());
         }
         *self.display_order.borrow_mut() = order;
-        let cursor = if self.select_mode.get() { None } else { self.highlight_id.get() };
+        let editing = self.select_mode.get() || self.pin_edit.get();
+        let pin_edit = self.pin_edit.get();
+        let cursor = if editing { None } else { self.highlight_id.get() };
         let suggestion = self.suggestion.borrow().clone();
         let flash = self.flash.take();
+        let jitter = self.jitter_pending.get();
         let mut cursor_frame: Option<NSRect> = None;
 
+        // Default view (no search): both sections always show their slot
+        // counts, Samsung-style, and an empty pinned section says how to pin.
+        let recent_limit = self.recent_limit.get();
+        let show_pinned = query_empty || !pinned.is_empty();
+        let pin_hint = query_empty && pinned.is_empty() && !pin_edit;
+        let show_recent_header = !recent.is_empty() && show_pinned;
         let rows_h = |list: &[&ClipboardItem]| -> f64 {
             list.iter().map(|i| row::row_height(i) + ROW_GAP).sum()
         };
-        let both = !pinned.is_empty() && !recent.is_empty();
-        let mut content_h = 6.0_f64;
-        if !pinned.is_empty() {
-            content_h += SECTION_H + 4.0 + rows_h(&pinned);
-        }
-        if both {
-            content_h += SEP_H + 12.0;
-        }
-        if !recent.is_empty() {
-            if both {
-                content_h += SECTION_H + 4.0;
+
+        let (doc_w, doc_h) = match mode {
+            ViewMode::Columns => {
+                let col_h = |list: &[&ClipboardItem]| 6.0 + SECTION_H + 4.0 + rows_h(list);
+                let content_h = col_h(&pinned).max(col_h(&recent)) + 6.0;
+                (list_w, content_h.max(clip_h))
             }
-            content_h += rows_h(&recent);
-        }
-        content_h += 6.0;
-        let doc_h = content_h.max(clip_h);
-        self.list_document
-            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(list_w, doc_h)));
-
-        // Lay out from the top of the document (y grows upward in AppKit).
-        let mut y = doc_h - 6.0;
-        let select = self.select_mode.get();
-
-        let mut place_rows = |list: &[&ClipboardItem], y: &mut f64| {
-            for item in list {
-                let h = row::row_height(item);
-                *y -= h;
-                let state = row::RowState {
-                    select_mode: select,
-                    selected: self.is_selected(item.id),
-                    cursor: cursor == Some(item.id),
-                    suggestion: suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str()),
-                };
-                let view = row::make_row(mtm, item, action_target, &state, content_w);
-                let frame = NSRect::new(NSPoint::new(PAD, *y), NSSize::new(content_w, h));
-                view.setFrame(frame);
-                if state.cursor {
-                    cursor_frame = Some(frame);
-                }
-                self.list_document.addSubview(&view);
-                if let Some((id, kind)) = flash {
-                    if id == item.id {
-                        let color = match kind {
-                            Flash::Pinned => theme::neon_pin(),
-                            Flash::Unpinned => theme::glass(0.9),
-                        };
-                        theme::flash(mtm, &view, &color, 9.0);
+            ViewMode::Strip => {
+                let card_w = 168.0_f64;
+                let gap = 8.0_f64;
+                let groups = !pinned.is_empty() && !recent.is_empty();
+                let n = (pinned.len() + recent.len()) as f64;
+                let width = PAD * 2.0 + n * (card_w + gap) + if groups { 16.0 } else { 0.0 };
+                let max_h = items.iter().map(|i| row::row_height(i)).fold(0.0, f64::max);
+                (width.max(list_w), (max_h + 12.0).max(clip_h))
+            }
+            ViewMode::Stack => {
+                let mut content_h = 6.0_f64;
+                if show_pinned {
+                    content_h += SECTION_H + 4.0 + rows_h(&pinned);
+                    if pin_hint {
+                        content_h += HINT_H;
                     }
                 }
-                *y -= ROW_GAP;
+                if show_recent_header {
+                    content_h += SEP_H + 12.0 + SECTION_H + 4.0;
+                }
+                content_h += rows_h(&recent) + 6.0;
+                (list_w, content_h.max(clip_h))
+            }
+        };
+        self.list_document
+            .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(doc_w, doc_h)));
+
+        let mut place_one = |item: &ClipboardItem, x: f64, y: f64, w: f64| {
+            let state = row::RowState {
+                select_mode: editing,
+                selected: if pin_edit { item.is_pinned } else { self.is_selected(item.id) },
+                cursor: cursor == Some(item.id),
+                suggestion: suggestion.as_ref().filter(|s| s.0 == item.id).map(|s| s.1.as_str()),
+                pin_edit,
+            };
+            let view = row::make_row(mtm, item, action_target, &state, w);
+            let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, row::row_height(item)));
+            view.setFrame(frame);
+            if state.cursor {
+                cursor_frame = Some(frame);
+            }
+            self.list_document.addSubview(&view);
+            if jitter {
+                theme::jitter(&view);
+            }
+            if let Some((id, kind)) = flash {
+                if id == item.id {
+                    let color = match kind {
+                        Flash::Pinned => theme::neon_pin(),
+                        Flash::Unpinned => theme::glass(0.9),
+                    };
+                    theme::flash(mtm, &view, &color, 9.0);
+                }
             }
         };
 
-        if !pinned.is_empty() {
-            y -= SECTION_H;
-            let header = section_header(mtm, &format!("Pinned  ·  {}", pinned.len()), PAD, y, content_w);
-            self.list_document.addSubview(&header);
-            y -= 4.0;
-            place_rows(&pinned, &mut y);
+        match mode {
+            ViewMode::Columns => {
+                let gap = 8.0;
+                let col_w = ((content_w - gap) / 2.0).max(80.0);
+                let mut lay = |list: &[&ClipboardItem], title: &str, x: f64| {
+                    let mut y = doc_h - 6.0;
+                    y -= SECTION_H;
+                    let header = section_header(mtm, title, x, y, col_w);
+                    self.list_document.addSubview(&header);
+                    y -= 4.0;
+                    for item in list {
+                        let h = row::row_height(item);
+                        y -= h;
+                        place_one(item, x, y, col_w);
+                        y -= ROW_GAP;
+                    }
+                };
+                lay(&pinned, &format!("Pinned  ·  {}/{MAX_PINNED}", pinned.len()), PAD);
+                lay(&recent, &format!("Recent  ·  {}/{recent_limit}", recent.len()), PAD + col_w + gap);
+            }
+            ViewMode::Strip => {
+                let card_w = 168.0;
+                let top = doc_h - 6.0;
+                let mut x = PAD;
+                for item in &pinned {
+                    let h = row::row_height(item);
+                    place_one(item, x, top - h, card_w);
+                    x += card_w + 8.0;
+                }
+                if !pinned.is_empty() && !recent.is_empty() {
+                    x += 16.0;
+                }
+                for item in &recent {
+                    let h = row::row_height(item);
+                    place_one(item, x, top - h, card_w);
+                    x += card_w + 8.0;
+                }
+            }
+            ViewMode::Stack => {
+                let mut y = doc_h - 6.0;
+                let mut place_rows = |list: &[&ClipboardItem], y: &mut f64| {
+                    for item in list {
+                        let h = row::row_height(item);
+                        *y -= h;
+                        place_one(item, PAD, *y, content_w);
+                        *y -= ROW_GAP;
+                    }
+                };
+                if show_pinned {
+                    y -= SECTION_H;
+                    let title = format!("Pinned  ·  {}/{MAX_PINNED}", pinned.len());
+                    let header = section_header(mtm, &title, PAD, y, content_w);
+                    self.list_document.addSubview(&header);
+                    y -= 4.0;
+                    place_rows(&pinned, &mut y);
+                    if pin_hint {
+                        y -= HINT_H;
+                        let hint = NSTextField::labelWithString(
+                            ns_string!("No pins yet. Click the pin on any clip, or press ⌘P."),
+                            mtm,
+                        );
+                        hint.setFont(Some(&theme::ui(11.0)));
+                        hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                        hint.setFrame(NSRect::new(
+                            NSPoint::new(PAD + 4.0, y + 4.0),
+                            NSSize::new(content_w - 8.0, HINT_H - 8.0),
+                        ));
+                        self.list_document.addSubview(&hint);
+                    }
+                }
+                if show_recent_header {
+                    y -= 6.0 + SEP_H;
+                    let sep = section_separator(mtm, PAD, y, content_w);
+                    self.list_document.addSubview(&sep);
+                    y -= 6.0;
+                    y -= SECTION_H;
+                    let title = format!("Recent  ·  {}/{recent_limit}", recent.len());
+                    let header = section_header(mtm, &title, PAD, y, content_w);
+                    self.list_document.addSubview(&header);
+                    y -= 4.0;
+                }
+                place_rows(&recent, &mut y);
+            }
         }
-        if both {
-            y -= 6.0 + SEP_H;
-            let sep = section_separator(mtm, PAD, y, content_w);
-            self.list_document.addSubview(&sep);
-            y -= 6.0;
-            y -= SECTION_H;
-            let header = section_header(mtm, &format!("Recent  ·  {}", recent.len()), PAD, y, content_w);
-            self.list_document.addSubview(&header);
-            y -= 4.0;
-        }
-        place_rows(&recent, &mut y);
+        self.jitter_pending.set(false);
 
-        // Keep newest content visible at the top of the scroll view.
+        // Stack and columns keep the top on screen. The strip starts at the left.
         let clip = self.scroll_view.contentView();
-        let max_y = (doc_h - clip.bounds().size.height).max(0.0);
-        clip.scrollToPoint(NSPoint::new(0.0, max_y));
+        if mode == ViewMode::Strip {
+            clip.scrollToPoint(NSPoint::new(0.0, (doc_h - clip.bounds().size.height).max(0.0)));
+        } else {
+            let max_y = (doc_h - clip.bounds().size.height).max(0.0);
+            clip.scrollToPoint(NSPoint::new(0.0, max_y));
+        }
         self.scroll_view.reflectScrolledClipView(&clip);
-        // Then make sure the keyboard cursor is on screen.
-        if let Some(frame) = cursor_frame {
+        // The first row needs no scroll: staying at the top keeps the PINNED
+        // and RECENT headers in view on a small floater.
+        let cursor_is_first = cursor.is_some() && self.display_order.borrow().first().copied() == cursor;
+        if let Some(frame) = cursor_frame.filter(|_| !cursor_is_first) {
             let _ = self.list_document.scrollRectToVisible(frame);
         }
     }
@@ -856,6 +1036,8 @@ struct PopoverParts {
     empty_label: Retained<NSTextField>,
     status_label: Retained<NSTextField>,
     select_button: Retained<NSButton>,
+    view_button: Retained<NSButton>,
+    pin_edit_button: Retained<NSButton>,
     delete_selected_button: Retained<NSButton>,
     clear_history_button: Retained<NSButton>,
     cancel_select_button: Retained<NSButton>,
@@ -1023,6 +1205,32 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
     select_button.setToolTip(Some(ns_string!("Select multiple items to delete")));
     select_button.setAutoresizingMask(top_right);
     history_container.addSubview(&select_button);
+
+    // Left of the right-hand cluster: layout cycle, then the pin-unlock icon.
+    // Hidden while multi-select is open so Delete/Cancel keep their room.
+    let view_button = make_toolbar_text_button(mtm, "Stack", PAD + 112.0, toolbar_y, 58.0, btn_h, false);
+    view_button.setToolTip(Some(ns_string!(
+        "Cycle layout: stack, two columns (pinned | recent), horizontal strip"
+    )));
+    view_button.setAutoresizingMask(top);
+    history_container.addSubview(&view_button);
+
+    let pin_edit_button = if let Some(pin_img) = system_symbol("pin", "Unlock pins", 13.0) {
+        unsafe { NSButton::buttonWithImage_target_action(&pin_img, None, None, mtm) }
+    } else {
+        unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Pins"), None, None, mtm) }
+    };
+    pin_edit_button.setBordered(false);
+    pin_edit_button.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+    pin_edit_button.setFrame(NSRect::new(
+        NSPoint::new(PAD + 174.0, toolbar_y),
+        NSSize::new(26.0, btn_h),
+    ));
+    pin_edit_button.setToolTip(Some(ns_string!(
+        "Unlock pins: rows shake, click a row to pin or unpin (⌃⌘U)"
+    )));
+    pin_edit_button.setAutoresizingMask(top);
+    history_container.addSubview(&pin_edit_button);
 
     // Select-mode toolbar, right to left: [Pin] [Delete (n)] [Cancel].
     let delete_selected_button = make_toolbar_text_button(
@@ -1226,6 +1434,8 @@ fn build_popover(mtm: MainThreadMarker) -> PopoverParts {
         empty_label,
         status_label,
         select_button,
+        view_button,
+        pin_edit_button,
         delete_selected_button,
         clear_history_button,
         cancel_select_button,

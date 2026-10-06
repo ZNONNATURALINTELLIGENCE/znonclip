@@ -53,6 +53,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSParagraphStyle",
     "NSBox",
     "NSTrackingArea",
+    "NSAlert",
     "NSAnimation",
     "NSAnimationContext",
     "NSImageView",

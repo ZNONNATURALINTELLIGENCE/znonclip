@@ -10,11 +10,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSEvent, NSEventType, NSRunningApplication, NSSearchField, NSStatusItem,
-    NSWindowDelegate, NSWorkspace,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationOptions,
+    NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventType,
+    NSRunningApplication, NSSearchField, NSStatusItem, NSWindowDelegate, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSTimer};
+use objc2_foundation::{
+    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
+};
 
 use crate::accessibility;
 use crate::autopaste;
@@ -222,7 +224,11 @@ define_class!(
             let Some(status) = status_ref.as_ref() else {
                 return Bool::NO;
             };
-            if !status.is_shown() || status.is_select_mode() || status.settings_visible() {
+            if !status.is_shown()
+                || status.is_select_mode()
+                || status.is_pin_edit()
+                || status.settings_visible()
+            {
                 return Bool::NO;
             }
             // ⌘-chords on the highlighted row: ⌘P pin, ⌘E expand, ⌘⌫ delete.
@@ -310,25 +316,42 @@ define_class!(
         }
 
         /// ⌃⌘U (unlock = 1) / ⌃⌘L (lock = 0). Registered only while the floater
-        /// is visible. P0 maps unlock/lock to the multi-select mode; the full
-        /// Samsung pin-mode semantics (jitter, add/remove from pins) land in P3.
+        /// is visible. Unlock shakes the rows and a click pins or unpins.
         // SAFETY: called from the Carbon hotkey handler with an NSInteger.
         #[unsafe(method(hotkeyPinMode:))]
         fn hotkey_pin_mode(&self, unlock: isize) {
+            info!("pin mode → {} via hotkey", if unlock != 0 { "unlocked" } else { "locked" });
+            self.set_pin_edit_mode(unlock != 0);
+        }
+
+        /// Toolbar pin icon: the same unlock / lock as ⌃⌘U / ⌃⌘L.
+        // SAFETY: control action.
+        #[unsafe(method(togglePinEdit:))]
+        fn toggle_pin_edit(&self, _sender: Option<&AnyObject>) {
+            let on = self
+                .ivars()
+                .status
+                .borrow()
+                .as_ref()
+                .is_some_and(|s| !s.is_pin_edit());
+            self.set_pin_edit_mode(on);
+        }
+
+        /// Toolbar layout button: stack, then two columns, then the strip.
+        // SAFETY: control action.
+        #[unsafe(method(cycleViewMode:))]
+        fn cycle_view_mode(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
             let target: *const AnyObject = (self as *const Self).cast();
-            let unlock = unlock != 0;
-            info!("pin mode → {} via hotkey", if unlock { "unlocked" } else { "locked" });
+            let next = self.ivars().settings.borrow().view_mode.next();
+            self.ivars().settings.borrow_mut().view_mode = next;
+            self.persist_settings();
             if let Some(ref status) = *self.ivars().status.borrow() {
-                status.show_history();
-                status.set_select_mode(unlock);
-                status.set_status_notice(Some(if unlock {
-                    "Unlocked: select items (⌃⌘L to lock)"
-                } else {
-                    "Locked"
-                }));
+                status.set_view_mode(next);
+                status.set_status_notice(Some(next.notice()));
             }
             self.reload_list(mtm, unsafe { &*target });
+            info!("view mode → {}", next.as_str());
         }
 
         /// Gear button — show/hide settings panel.
@@ -761,6 +784,16 @@ define_class!(
                 ids.iter().all(|id| h.get(*id).is_some_and(|i| i.is_pinned))
             };
             let want = !all_pinned;
+            if !want
+                && !Self::user_confirms(
+                    mtm,
+                    &format!("Unpin {} clips?", ids.len()),
+                    "They go back to recents.",
+                    "Unpin",
+                )
+            {
+                return;
+            }
             let mut changed = 0usize;
             let mut refused = 0usize;
             for id in &ids {
@@ -879,6 +912,14 @@ define_class!(
             if ids.is_empty() {
                 return;
             }
+            if !Self::user_confirms(
+                mtm,
+                &format!("Delete {} clips?", ids.len()),
+                "This removes them from history.",
+                "Delete",
+            ) {
+                return;
+            }
 
             if let Some(ref storage) = *self.ivars().storage.borrow() {
                 match storage.delete_items(&ids) {
@@ -905,6 +946,14 @@ define_class!(
         fn clear_history(&self, _sender: Option<&AnyObject>) {
             let mtm = self.mtm();
             let target: *const AnyObject = (self as *const Self).cast();
+            if !Self::user_confirms(
+                mtm,
+                "Clear unpinned history?",
+                "Pinned items stay.",
+                "Clear",
+            ) {
+                return;
+            }
 
             if let Some(ref storage) = *self.ivars().storage.borrow() {
                 match storage.clear_unpinned() {
@@ -934,6 +983,35 @@ define_class!(
 );
 
 impl ZnonClipAppDelegate {
+    /// Modal are-you-sure. The first button is the named action; Cancel is second.
+    /// Headless snapshots never block and never confirm a destructive action.
+    fn user_confirms(mtm: MainThreadMarker, title: &str, detail: &str, action: &str) -> bool {
+        if std::env::var_os(SNAPSHOT_ENV).is_some() {
+            return false;
+        }
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(detail));
+        let _ = alert.addButtonWithTitle(&NSString::from_str(action));
+        let _ = alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        alert.runModal() == NSAlertFirstButtonReturn
+    }
+
+    fn set_pin_edit_mode(&self, on: bool) {
+        let mtm = self.mtm();
+        let target: *const AnyObject = (self as *const Self).cast();
+        if let Some(ref status) = *self.ivars().status.borrow() {
+            status.show_history();
+            status.set_pin_edit(on);
+            status.set_status_notice(Some(if on {
+                "Unlocked: click a row to pin or unpin"
+            } else {
+                "Locked"
+            }));
+        }
+        self.reload_list(mtm, unsafe { &*target });
+    }
+
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AppDelegateIvars::default());
         // SAFETY: NSObject init signature is correct.
@@ -987,6 +1065,11 @@ impl ZnonClipAppDelegate {
             info!("pin refused: cap {MAX_PINNED}");
             return;
         }
+        if currently_pinned
+            && !Self::user_confirms(mtm, "Unpin this clip?", "It goes back to recents.", "Unpin")
+        {
+            return;
+        }
         if !self.set_pin(id, new_pin) {
             return;
         }
@@ -1029,8 +1112,16 @@ impl ZnonClipAppDelegate {
         }
     }
 
-    /// Slide the row out, then delete it. Rows not on screen go straight away.
+    /// Ask, then slide the row out and delete it. Cancel leaves the row in place.
     fn delete_animated(&self, id: u64) {
+        if !Self::user_confirms(
+            self.mtm(),
+            "Delete this clip?",
+            "This removes it from history.",
+            "Delete",
+        ) {
+            return;
+        }
         // Leave the cache now, so a reload during the animation (a new copy, a
         // search keystroke) cannot bring the row back. Storage commits after.
         self.ivars().history.borrow_mut().remove(id);
