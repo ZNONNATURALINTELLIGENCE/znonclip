@@ -1,114 +1,25 @@
-[package]
-name = "znonclip"
-version = "0.2.0"
+[workspace]
+members = [
+    "crates/znonclip-core",
+    "crates/znonclip",
+    "crates/znonclip-cli",
+    "crates/znonclip-agent",
+]
+resolver = "2"
+
+[workspace.package]
 edition = "2021"
-description = "Lightweight macOS menu-bar clipboard manager with local, advisory predictive paste"
-authors = ["ZnonClip contributors", "ClipPin Contributors (upstream)"]
 license = "MIT"
-readme = "README.md"
+authors = ["ZnonClip contributors", "ClipPin Contributors (upstream)"]
 repository = "https://github.com/ZNONNATURALINTELLIGENCE/znonclip"
-keywords = ["clipboard", "macos", "menu-bar", "productivity"]
-categories = ["gui", "os::macos-apis"]
 
-[dependencies]
-# Native macOS AppKit bindings
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = [
-    "NSApplication",
-    "NSRunningApplication",
-    "NSPanel",
-    "NSVisualEffectView",
-    "NSWorkspace",
-    "NSStatusBar",
-    "NSStatusItem",
-    "NSStatusBarButton",
-    "NSPopover",
-    "NSPasteboard",
-    "NSImage",
-    "NSView",
-    "NSViewController",
-    "NSTextField",
-    "NSSearchField",
-    "NSMenu",
-    "NSMenuItem",
-    "NSEvent",
-    "NSWindow",
-    "NSColor",
-    "NSFont",
-    "NSButton",
-    "NSControl",
-    "NSCell",
-    "NSResponder",
-    "NSScrollView",
-    "NSStackView",
-    "NSUserInterfaceLayout",
-    "NSBitmapImageRep",
-    "NSGraphics",
-    "NSImageRep",
-    "NSText",
-    "NSPopUpButton",
-    "NSButtonCell",
-    "NSFontDescriptor",
-    "NSParagraphStyle",
-    "NSBox",
-    "block2",
-] }
-objc2-foundation = { version = "0.3", features = [
-    "NSString",
-    "NSArray",
-    "NSData",
-    "NSTimer",
-    "NSURL",
-    "NSRunLoop",
-    "NSDictionary",
-    "NSObject",
-    "NSDate",
-    "NSBundle",
-    "NSGeometry",
-    "NSValue",
-    "NSNotification",
-    "NSAttributedString",
-] }
-# CGEvent keyboard simulation (auto-paste)
-objc2-core-graphics = { version = "0.3", features = [
-    "CGEvent",
-    "CGEventTypes",
-    "CGEventSource",
-    "CGRemoteOperation",
-] }
-block2 = { version = "0.6", features = ["alloc"] }
-
-# Persistence (bundled SQLite — no system lib required)
-rusqlite = { version = "0.32", features = ["bundled"] }
-
-# App data paths (Application Support)
-directories = "5"
-
-# Logging
-log = "0.4"
-env_logger = "0.11"
-
-# Error handling (project coding conventions)
+[workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
-sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[package.metadata.bundle]
-name = "ZnonClip"
-identifier = "com.znonclip.app"
-# Agent app: no Dock icon, no main menu bar (merged via Info.plist)
-osx_info_plist_exts = ["Info.plist"]
-category = "public.app-category.utilities"
-short_description = "Lightweight macOS menu-bar clipboard history manager"
-long_description = """
-ZnonClip is a local-first clipboard manager that lives in the macOS menu bar.
-It monitors clipboard changes, stores searchable history, and supports pin,
-search, global hotkey, auto-paste, and a local advisory ranker that
-pre-highlights the item you most likely want to paste.
-"""
-osx_minimum_system_version = "13.0"
-
-[[bin]]
-name = "znonclip"
-path = "src/main.rs"
+rusqlite = { version = "0.32", features = ["bundled"] }
+log = "0.4"
+env_logger = "0.11"
+directories = "5"
+sha2 = "0.10"
