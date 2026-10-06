@@ -566,18 +566,31 @@ impl ClipboardPoller {
             return PollResult::SkippedPrivate(markers);
         }
 
-        match extract_clipboard_item(&pb) {
-            Some(item) => {
+        let extracted = extract_clipboard_item(&pb).map(|item| {
+            let full = if item.content_type == ContentType::Image {
+                extract_full_image(&pb)
+            } else {
+                None
+            };
+            (item, full)
+        });
+
+        // The markers were checked before the read. If the pasteboard changed in
+        // between (say a password manager wrote a concealed secret), what we read
+        // may be that secret: drop it. The next poll sees the new changeCount and
+        // checks its markers before anything is stored.
+        if pb.changeCount() as isize != count {
+            debug!("clipboard changed during read; capture dropped, next poll re-checks");
+            return PollResult::EmptyOrUnsupported;
+        }
+
+        match extracted {
+            Some((item, full)) => {
                 info!(
                     "captured {:?} — {}",
                     item.content_type,
                     truncate_for_log(&item.preview, 80)
                 );
-                let full = if item.content_type == ContentType::Image {
-                    extract_full_image(&pb)
-                } else {
-                    None
-                };
                 PollResult::Captured(item, full)
             }
             None => {
