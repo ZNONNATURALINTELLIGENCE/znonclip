@@ -140,6 +140,20 @@ impl Storage {
             .conn
             .prepare("SELECT 1 FROM pragma_table_info('clipboard_items') WHERE name = 'content_image_full'")?
             .exists([])?;
+        // Receipt (added 2026-10-07): content SHA-256 recorded at capture, what it
+        // covers, and the first-copied time (created_at becomes "last copied").
+        let has_receipt: bool = self
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('clipboard_items') WHERE name = 'content_sha256'")?
+            .exists([])?;
+        if !has_receipt {
+            self.conn.execute_batch(
+                "ALTER TABLE clipboard_items ADD COLUMN content_sha256 TEXT;
+                 ALTER TABLE clipboard_items ADD COLUMN sha256_basis TEXT;
+                 ALTER TABLE clipboard_items ADD COLUMN first_copied_at TEXT;",
+            )?;
+            info!("storage: added receipt columns");
+        }
         if !has_full {
             self.conn.execute_batch(
                 "ALTER TABLE clipboard_items ADD COLUMN content_image_full BLOB;
@@ -157,6 +171,37 @@ impl Storage {
             params![full.bytes, full.kind.as_str(), id as i64],
         )?;
         Ok(())
+    }
+
+    /// Record item `id`'s receipt. The first-copied time is set once, from the row's
+    /// `created_at` at that moment, and never moved by later copies of the same content.
+    pub fn set_receipt(&self, id: u64, sha256: &str, basis: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE clipboard_items SET content_sha256 = ?1, sha256_basis = ?2,
+                    first_copied_at = COALESCE(first_copied_at, created_at) WHERE id = ?3",
+            params![sha256, basis, id as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Item `id`'s receipt: (content SHA-256, basis, first copied, last copied).
+    /// The hash and basis are None for items captured before receipts existed.
+    pub fn receipt(&self, id: u64) -> Result<Option<Receipt>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT content_sha256, sha256_basis, first_copied_at, created_at FROM clipboard_items WHERE id = ?1",
+                params![id as i64],
+                |r| {
+                    Ok(Receipt {
+                        sha256: r.get(0)?,
+                        basis: r.get(1)?,
+                        first_copied_at: r.get(2)?,
+                        last_copied_at: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// The original image for item `id`, if one was kept.
@@ -731,6 +776,15 @@ fn enable_incremental_auto_vacuum(conn: &Connection) -> Result<()> {
     conn.execute_batch("VACUUM;")?;
     info!("storage: switched auto_vacuum {mode} -> incremental");
     Ok(())
+}
+
+/// What the receipt button shows for one item.
+#[derive(Debug, Clone)]
+pub struct Receipt {
+    pub sha256: Option<String>,
+    pub basis: Option<String>,
+    pub first_copied_at: Option<String>,
+    pub last_copied_at: String,
 }
 
 /// Clipboard history can hold anything you copied: keep it owner-only.

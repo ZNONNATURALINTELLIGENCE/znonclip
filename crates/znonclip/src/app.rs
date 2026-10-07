@@ -21,7 +21,7 @@ use objc2_foundation::{
 use crate::accessibility;
 use crate::autopaste;
 use crate::clipboard::{
-    copy_item_to_pasteboard, ClipboardPoller, History, PollResult, DEFAULT_HISTORY_LIMIT,
+    copy_item_to_pasteboard, copy_plain_text, ClipboardPoller, History, PollResult, DEFAULT_HISTORY_LIMIT,
 };
 use crate::hotkey::{self, HotkeyManager};
 use crate::launch;
@@ -245,6 +245,7 @@ define_class!(
                 match (code & !hotkey::CMD_CHORD) as u16 {
                     hotkey::KEY_P => self.toggle_pin(id),
                     hotkey::KEY_E => self.toggle_expand(id),
+                    hotkey::KEY_I => self.toggle_receipt(id),
                     hotkey::KEY_DELETE => self.delete_animated(id),
                     _ => return Bool::NO,
                 }
@@ -543,8 +544,13 @@ define_class!(
                     *self.ivars().clipboard_hash.borrow_mut() = Some(item.hash.clone());
 
                     if let Some(ref storage) = *self.ivars().storage.borrow() {
+                        let (sha, basis) = crate::clipboard::content_sha256(&item, full.as_ref());
                         match storage.touch_latest_if_hash(&item.hash) {
                             Ok(Some(existing_id)) => {
+                                // Rows from before receipts existed get one now.
+                                if let Err(e) = storage.set_receipt(existing_id, &sha, basis) {
+                                    warn!("recording receipt failed: {e}");
+                                }
                                 item.id = existing_id;
                                 item.created_at = String::new();
                                 self.ivars().history.borrow_mut().push_front(item);
@@ -556,6 +562,9 @@ define_class!(
                                     Ok((id, created_at)) => {
                                         item.id = id;
                                         item.created_at = created_at;
+                                        if let Err(e) = storage.set_receipt(id, &sha, basis) {
+                                            warn!("recording receipt failed: {e}");
+                                        }
                                         if let Some(ref full) = full {
                                             if let Err(e) = storage.set_full_image(id, full) {
                                                 warn!("storing original image failed: {e}");
@@ -753,6 +762,35 @@ define_class!(
         fn expand_history_item(&self, sender: Option<&AnyObject>) {
             if let Some(id) = sender_item_id(sender) {
                 self.toggle_expand(id);
+            }
+        }
+
+        /// Row clock-in-chain button or ⌘I: show the item's receipt.
+        // SAFETY: control/menu action.
+        #[unsafe(method(receiptHistoryItem:))]
+        fn receipt_history_item(&self, sender: Option<&AnyObject>) {
+            if let Some(id) = sender_item_id(sender) {
+                self.toggle_receipt(id);
+            }
+        }
+
+        /// Copy the item's content SHA-256 (receipt panel or row menu).
+        // SAFETY: control/menu action.
+        #[unsafe(method(copyReceiptHash:))]
+        fn copy_receipt_hash(&self, sender: Option<&AnyObject>) {
+            let Some(id) = sender_item_id(sender) else { return };
+            if let Some(sha) = self.receipt_for(id).and_then(|r| r.sha256) {
+                self.copy_receipt_string(&sha, "SHA-256 copied");
+            }
+        }
+
+        /// Copy the full receipt as text: hash, what it covers, first and last copied.
+        // SAFETY: control action.
+        #[unsafe(method(copyReceiptText:))]
+        fn copy_receipt_text(&self, sender: Option<&AnyObject>) {
+            let Some(id) = sender_item_id(sender) else { return };
+            if let Some(r) = self.receipt_for(id) {
+                self.copy_receipt_string(&preview::receipt_text(&r), "Receipt copied");
             }
         }
 
@@ -1205,6 +1243,42 @@ impl ZnonClipAppDelegate {
         preview::toggle_expanded(self.mtm(), &item, anchor, floater, unsafe { &*target });
     }
 
+    /// Item `id`'s receipt. Rows captured before receipts existed get their hash
+    /// computed and stored now (from the original image when one was kept).
+    fn receipt_for(&self, id: u64) -> Option<crate::storage::Receipt> {
+        let storage = self.ivars().storage.borrow();
+        let storage = storage.as_ref()?;
+        let r = storage.receipt(id).ok().flatten()?;
+        if r.sha256.is_some() {
+            return Some(r);
+        }
+        let item = self.item_by_id(id)?;
+        let full = storage.full_image(id).ok().flatten();
+        let (sha, basis) = crate::clipboard::content_sha256(&item, full.as_ref());
+        if let Err(e) = storage.set_receipt(id, &sha, basis) {
+            warn!("backfilling receipt failed: {e}");
+        }
+        storage.receipt(id).ok().flatten()
+    }
+
+    fn toggle_receipt(&self, id: u64) {
+        let (Some(item), Some(receipt), Some((anchor, floater))) =
+            (self.item_by_id(id), self.receipt_for(id), self.preview_anchor(id))
+        else {
+            return;
+        };
+        let target: *const AnyObject = (self as *const Self).cast();
+        preview::toggle_receipt(self.mtm(), &item, &receipt, anchor, floater, unsafe { &*target });
+    }
+
+    fn copy_receipt_string(&self, text: &str, notice: &str) {
+        if copy_plain_text(text) {
+            if let Some(ref status) = *self.ivars().status.borrow() {
+                status.set_status_notice(Some(notice));
+            }
+        }
+    }
+
     fn follow_expanded(&self, id: u64) {
         let (Some(item), Some((anchor, floater))) = (self.item_for_expanded(id), self.preview_anchor(id)) else {
             return;
@@ -1264,6 +1338,9 @@ impl ZnonClipAppDelegate {
             if let Some(item) = item {
                 save(&preview::snapshot_view(mtm, item, false), &format!("preview-{tag}-hover.png"));
                 save(&preview::snapshot_view(mtm, item, true), &format!("preview-{tag}-expanded.png"));
+                if let Some(r) = self.receipt_for(item.id) {
+                    save(&preview::snapshot_receipt(mtm, item, &r, unsafe { &*target }), &format!("receipt-{tag}.png"));
+                }
             }
         }
     }

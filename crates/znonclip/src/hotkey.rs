@@ -298,6 +298,7 @@ pub const KEY_DOWN: u16 = 125;
 pub const KEY_UP: u16 = 126;
 pub const KEY_P: u16 = 35;
 pub const KEY_E: u16 = 14;
+pub const KEY_I: u16 = 34;
 pub const KEY_DELETE: u16 = 51;
 pub const KEY_EQUAL: u16 = 24;
 pub const KEY_MINUS: u16 = 27;
@@ -308,12 +309,12 @@ pub const KEY_PAD_ZERO: u16 = 82;
 /// Flag OR-ed into the code passed to `popoverNavKey:` for ⌘-chords.
 pub const CMD_CHORD: isize = 0x1_0000;
 
-/// ⌘P / ⌘E / ⌘⌫ (row actions on the highlighted item) and ⌘+ / ⌘− / ⌘0
+/// ⌘P / ⌘E / ⌘I / ⌘⌫ (row actions on the highlighted item) and ⌘+ / ⌘− / ⌘0
 /// (zoom). Shift is allowed so ⌘⇧= also zooms in, as in every Mac app.
 fn row_chord_code(event: &NSEvent) -> Option<isize> {
     let code = event.keyCode();
     let zoom = matches!(code, KEY_EQUAL | KEY_MINUS | KEY_ZERO | KEY_PAD_PLUS | KEY_PAD_MINUS | KEY_PAD_ZERO);
-    if !zoom && !matches!(code, KEY_P | KEY_E | KEY_DELETE) {
+    if !zoom && !matches!(code, KEY_P | KEY_E | KEY_I | KEY_DELETE) {
         return None;
     }
     let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;

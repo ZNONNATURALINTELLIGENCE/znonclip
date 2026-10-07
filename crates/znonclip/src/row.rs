@@ -29,7 +29,7 @@ const RADIUS: f64 = 9.0;
 const INSET: f64 = 7.0;
 const BTN: f64 = 24.0;
 const BTN_GAP: f64 = 2.0;
-const ACTIONS_W: f64 = BTN * 4.0 + BTN_GAP * 3.0;
+const ACTIONS_W: f64 = BTN * 5.0 + BTN_GAP * 4.0;
 /// Action strip opacity at rest; full on hover or for the keyboard-cursor row.
 const ACTIONS_REST_ALPHA: f64 = 0.38;
 /// How long the pointer rests on a row before the preview appears.
@@ -422,35 +422,40 @@ pub fn make_row(
 fn action_strip(mtm: MainThreadMarker, item: &ClipboardItem, target: &AnyObject) -> Retained<NSView> {
     let strip = NSView::new(mtm);
     let pinned = item.is_pinned;
-    let buttons: [(&str, &str, Sel, Retained<NSColor>); 4] = [
+    let buttons: [(Option<Retained<NSImage>>, &str, Sel, Retained<NSColor>); 5] = [
         (
-            if pinned { "pin.fill" } else { "pin" },
+            theme::symbol(if pinned { "pin.fill" } else { "pin" }, "Pin", 12.0),
             if pinned { "Unpin (⌘P)" } else { "Pin (⌘P)" },
             sel!(pinHistoryItem:),
             // Violet means "pinned": an unpinned row's pin stays neutral.
             if pinned { theme::neon_pin() } else { NSColor::secondaryLabelColor() },
         ),
         (
-            "arrow.up.left.and.arrow.down.right",
+            theme::receipt_icon(11.0),
+            "Receipt: SHA-256 and time copied (⌘I)",
+            sel!(receiptHistoryItem:),
+            theme::with_alpha(&theme::neon(), 0.8),
+        ),
+        (
+            theme::symbol("arrow.up.left.and.arrow.down.right", "Expand", 12.0),
             "Expand preview (⌘E)",
             sel!(expandHistoryItem:),
             theme::with_alpha(&theme::neon(), 0.8),
         ),
         (
-            "arrow.turn.down.left",
+            theme::symbol("arrow.turn.down.left", "Paste", 12.0),
             "Paste (Enter)",
             sel!(copyHistoryItem:),
             theme::neon(),
         ),
         (
-            "trash",
+            theme::symbol("trash", "Delete", 12.0),
             "Delete (⌘⌫)",
             sel!(deleteHistoryItem:),
             theme::with_alpha(&theme::neon_danger(), 0.9),
         ),
     ];
-    for (i, (symbol, tip, action, tint)) in buttons.into_iter().enumerate() {
-        let img = theme::symbol(symbol, tip, 12.0);
+    for (i, (img, tip, action, tint)) in buttons.into_iter().enumerate() {
         let b = match img {
             Some(img) => unsafe {
                 NSButton::buttonWithImage_target_action(&img, Some(target), Some(action), mtm)
@@ -472,13 +477,15 @@ fn action_strip(mtm: MainThreadMarker, item: &ClipboardItem, target: &AnyObject)
 fn context_menu(mtm: MainThreadMarker, item: &ClipboardItem, target: &AnyObject) -> Retained<NSMenu> {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
-    let entries: [(&NSString, Sel); 4] = [
+    let entries: [(&NSString, Sel); 6] = [
         (ns_string!("Paste"), sel!(copyHistoryItem:)),
         (
             if item.is_pinned { ns_string!("Unpin") } else { ns_string!("Pin") },
             sel!(pinHistoryItem:),
         ),
         (ns_string!("Expand preview"), sel!(expandHistoryItem:)),
+        (ns_string!("Show receipt"), sel!(receiptHistoryItem:)),
+        (ns_string!("Copy SHA-256"), sel!(copyReceiptHash:)),
         (ns_string!("Delete"), sel!(deleteHistoryItem:)),
     ];
     for (title, action) in entries {

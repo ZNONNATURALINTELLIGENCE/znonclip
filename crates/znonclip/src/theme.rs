@@ -142,6 +142,47 @@ pub fn symbol(name: &str, a11y: &str, point_size: f64) -> Option<Retained<NSImag
     Some(configured)
 }
 
+/// The receipt button's icon: a clock with a chain link across its lower right,
+/// i.e. "this content, at this time, hashed". A template image, so the button tints it.
+/// The link is drawn over a knocked-out halo so the two shapes read apart.
+pub fn receipt_icon(point_size: f64) -> Option<Retained<NSImage>> {
+    use objc2::runtime::Bool;
+    use objc2_app_kit::NSCompositingOperation;
+    let clock = symbol("clock", "Receipt", point_size)?;
+    let link = symbol("link", "Receipt", point_size * 0.72)?;
+    let side = point_size * 1.45;
+    let handler = RcBlock::new(move |_r: NSRect| -> Bool {
+        let c = clock.size();
+        clock.drawInRect_fromRect_operation_fraction(
+            NSRect::new(NSPoint::new(0.0, side - c.height), c),
+            NSRect::ZERO,
+            NSCompositingOperation::SourceOver,
+            1.0,
+        );
+        let l = link.size();
+        let at = NSPoint::new(side - l.width, 0.0);
+        for (dx, dy) in [(-1.2, 0.0), (1.2, 0.0), (0.0, -1.2), (0.0, 1.2)] {
+            link.drawInRect_fromRect_operation_fraction(
+                NSRect::new(NSPoint::new(at.x + dx, at.y + dy), l),
+                NSRect::ZERO,
+                NSCompositingOperation::DestinationOut,
+                1.0,
+            );
+        }
+        link.drawInRect_fromRect_operation_fraction(
+            NSRect::new(at, l),
+            NSRect::ZERO,
+            NSCompositingOperation::SourceOver,
+            1.0,
+        );
+        Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(side, side), false, &handler);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str("Receipt: SHA-256 and time copied")));
+    Some(image)
+}
+
 pub fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }

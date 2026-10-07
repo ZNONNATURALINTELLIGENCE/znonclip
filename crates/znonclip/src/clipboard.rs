@@ -161,6 +161,55 @@ pub struct ClipboardItem {
     pub preview: String,
 }
 
+/// Put plain `text` on the general pasteboard (receipt hash / receipt text).
+/// ZnonClip captures it like any other copy, so the hash is pasteable from history too.
+pub fn copy_plain_text(text: &str) -> bool {
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    pb.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString })
+}
+
+/// A receipt hash anyone can reproduce: SHA-256 over exactly the bytes that
+/// were copied, with no type prefix (unlike the internal de-duplication hash).
+///
+/// - text, RTF, HTML: the plain text (what `pbpaste` prints) when there is one
+/// - image: the original PNG/TIFF bytes as copied; the stored thumbnail only if
+///   the original was not kept (the basis says so)
+/// - URL: the URL string · files: the paths, one per line
+///
+/// Returns the lowercase hex digest and a short description of what was hashed.
+pub fn content_sha256(item: &ClipboardItem, full: Option<&FullImage>) -> (String, &'static str) {
+    fn hex(bytes: &[u8]) -> String {
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+    match item.content_type {
+        ContentType::Image => match (full, item.content_image.as_deref()) {
+            (Some(f), _) => (hex(&f.bytes), "original image bytes"),
+            (None, Some(thumb)) => (hex(thumb), "stored thumbnail (original not kept)"),
+            (None, None) => (hex(b""), "no image data"),
+        },
+        ContentType::Url => match item.content_url.as_deref().or(item.content_text.as_deref()) {
+            Some(u) => (hex(u.as_bytes()), "URL text (UTF-8)"),
+            None => (hex(b""), "no URL"),
+        },
+        ContentType::File => {
+            let paths = item.content_file_paths.clone().unwrap_or_default().join("\n");
+            (hex(paths.as_bytes()), "file paths, one per line (UTF-8)")
+        }
+        ContentType::Text | ContentType::Rtf | ContentType::Html => {
+            if let Some(t) = item.content_text.as_deref() {
+                (hex(t.as_bytes()), "plain text (UTF-8), as pbpaste prints it")
+            } else if let Some(h) = item.content_html.as_deref() {
+                (hex(h.as_bytes()), "HTML source (UTF-8)")
+            } else if let Some(r) = item.content_rtf.as_deref() {
+                (hex(r), "RTF bytes")
+            } else {
+                (hex(b""), "no content")
+            }
+        }
+    }
+}
+
 impl ClipboardItem {
     /// Build a one-line UI preview from available fields.
     pub fn make_preview(
@@ -922,6 +971,48 @@ fn _now_ms() -> u64 {
 
 #[allow(dead_code)]
 fn _retain_marker(_: &Retained<NSString>) {}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn text_item(t: &str) -> ClipboardItem {
+        ClipboardItem {
+            id: 1,
+            content_type: ContentType::Text,
+            content_text: Some(t.into()),
+            content_rtf: None,
+            content_html: None,
+            content_image: None,
+            content_file_paths: None,
+            content_url: None,
+            source_app_bundle_id: None,
+            is_pinned: false,
+            created_at: String::new(),
+            hash: String::new(),
+            preview: t.into(),
+        }
+    }
+
+    /// Matches `printf hello | shasum -a 256`: anyone can reproduce it.
+    #[test]
+    fn text_receipt_is_plain_sha256_of_the_text() {
+        let (h, basis) = content_sha256(&text_item("hello"), None);
+        assert_eq!(h, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert!(basis.starts_with("plain text"));
+    }
+
+    #[test]
+    fn image_receipt_prefers_the_original() {
+        let mut item = text_item("");
+        item.content_type = ContentType::Image;
+        item.content_text = None;
+        item.content_image = Some(b"thumb".to_vec());
+        let full = FullImage { bytes: b"original".to_vec(), kind: FullImageKind::Png };
+        assert_eq!(content_sha256(&item, Some(&full)).1, "original image bytes");
+        assert_eq!(content_sha256(&item, None).1, "stored thumbnail (original not kept)");
+    }
+}
 
 #[cfg(test)]
 mod thumb_tests {

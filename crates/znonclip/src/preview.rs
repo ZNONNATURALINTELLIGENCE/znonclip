@@ -6,6 +6,9 @@
 //! * **Expanded**: the row's Expand button (or ⌘E) opens a bigger, scrollable,
 //!   selectable view that stays until Expand is pressed again, Esc, or the
 //!   floater closes. While expanded, hover peeks are suppressed.
+//! * **Receipt**: the row's clock-in-chain button (or ⌘I) shows the item's
+//!   content SHA-256, what the hash covers, and when it was first and last
+//!   copied, with Copy buttons. Sticky like Expanded.
 //!
 //! One borderless, non-activating panel is reused for both; it lives in a
 //! main-thread `thread_local` because rows and the app delegate both drive it.
@@ -25,6 +28,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 
 use crate::clipboard::{ClipboardItem, ContentType};
+use crate::storage::Receipt;
 use crate::theme::{self, rect};
 
 const PAD: f64 = 12.0;
@@ -47,6 +51,7 @@ const EXPANDED_TEXT_CHARS: usize = 200_000;
 enum Mode {
     Hover,
     Expanded,
+    Receipt,
 }
 
 struct Preview {
@@ -63,7 +68,7 @@ thread_local! {
 /// coordinates). No-op while an expanded preview is open.
 pub fn show_hover(mtm: MainThreadMarker, item: &ClipboardItem, anchor: NSRect, floater: NSRect) {
     with_preview(mtm, |p| {
-        if matches!(p.showing, Some((_, Mode::Expanded))) {
+        if matches!(p.showing, Some((_, Mode::Expanded | Mode::Receipt))) {
             return;
         }
         present(mtm, p, item, Mode::Hover, anchor, floater, None);
@@ -116,12 +121,46 @@ pub fn follow_if_expanded(
     });
 }
 
+/// True while a sticky panel (expanded preview or receipt) is open.
 pub fn is_expanded() -> bool {
     PREVIEW.with(|cell| {
         cell.borrow()
             .as_ref()
-            .is_some_and(|p| matches!(p.showing, Some((_, Mode::Expanded))))
+            .is_some_and(|p| matches!(p.showing, Some((_, Mode::Expanded | Mode::Receipt))))
     })
+}
+
+/// Toggle the receipt panel for `item`. Returns true if it is now open.
+pub fn toggle_receipt(
+    mtm: MainThreadMarker,
+    item: &ClipboardItem,
+    receipt: &Receipt,
+    anchor: NSRect,
+    floater: NSRect,
+    target: &AnyObject,
+) -> bool {
+    let mut open = false;
+    with_preview(mtm, |p| {
+        if p.showing == Some((item.id, Mode::Receipt)) {
+            dismiss(p);
+        } else {
+            let (content, size) = build_receipt(mtm, item, receipt, target);
+            present_built(mtm, p, item.id, Mode::Receipt, content, size, anchor, floater);
+            open = true;
+        }
+    });
+    open
+}
+
+/// The text "Copy receipt" puts on the pasteboard.
+pub fn receipt_text(receipt: &Receipt) -> String {
+    format!(
+        "ZnonClip receipt\nsha256: {}\ncovers: {}\nfirst copied: {}\nlast copied: {}\n",
+        receipt.sha256.as_deref().unwrap_or("not recorded"),
+        receipt.basis.as_deref().unwrap_or("unknown"),
+        receipt.first_copied_at.as_deref().unwrap_or("not recorded (captured before receipts)"),
+        receipt.last_copied_at,
+    )
 }
 
 /// Close whatever preview is showing.
@@ -194,8 +233,21 @@ fn present(
     floater: NSRect,
     close_target: Option<&AnyObject>,
 ) {
-    let expanded = mode == Mode::Expanded;
-    let (content, size) = build_content(mtm, item, expanded, close_target);
+    let (content, size) = build_content(mtm, item, mode == Mode::Expanded, close_target);
+    present_built(mtm, p, item.id, mode, content, size, anchor, floater);
+}
+
+fn present_built(
+    mtm: MainThreadMarker,
+    p: &mut Preview,
+    id: u64,
+    mode: Mode,
+    content: Retained<NSView>,
+    size: NSSize,
+    anchor: NSRect,
+    floater: NSRect,
+) {
+    let expanded = mode != Mode::Hover;
 
     let glass = NSVisualEffectView::new(mtm);
     glass.setMaterial(NSVisualEffectMaterial::HUDWindow);
@@ -237,7 +289,7 @@ fn present(
     p.panel.setIgnoresMouseEvents(!expanded);
     p.panel.setContentView(Some(&glass));
     p.panel.setFrame_display(frame, true);
-    p.showing = Some((item.id, mode));
+    p.showing = Some((id, mode));
 
     if !was_visible {
         p.panel.setAlphaValue(0.0);
@@ -386,6 +438,91 @@ fn build_content(
     (root, size)
 }
 
+/// "2026-10-07T14:03:22.123Z" → "2026-10-07 14:03:22 UTC".
+fn readable_utc(iso: &str) -> String {
+    match (iso.get(..10), iso.get(11..19)) {
+        (Some(d), Some(t)) if iso.ends_with('Z') => format!("{d} {t} UTC"),
+        _ => iso.to_string(),
+    }
+}
+
+fn build_receipt(
+    mtm: MainThreadMarker,
+    item: &ClipboardItem,
+    receipt: &Receipt,
+    target: &AnyObject,
+) -> (Retained<NSView>, NSSize) {
+    const W: f64 = 404.0;
+    const ROW: f64 = 17.0;
+    const BTN_H: f64 = 24.0;
+    let root = NSView::new(mtm);
+    let sha = receipt.sha256.as_deref().unwrap_or("not recorded");
+    // 64 hex chars as two lines of 32, so the hash never truncates.
+    let sha_shown = if sha.len() == 64 { format!("{}\n{}", &sha[..32], &sha[32..]) } else { sha.to_string() };
+    let facts: [(&str, String); 3] = [
+        ("covers", receipt.basis.clone().unwrap_or_else(|| "unknown".into())),
+        (
+            "first copied",
+            receipt
+                .first_copied_at
+                .as_deref()
+                .map(readable_utc)
+                .unwrap_or_else(|| "before receipts existed".into()),
+        ),
+        ("last copied", readable_utc(&receipt.last_copied_at)),
+    ];
+    let hash_h = 34.0;
+    let h = PAD + BTN_H + 10.0 + ROW * facts.len() as f64 + 8.0 + hash_h + 6.0 + CAPTION_H + PAD;
+    let size = NSSize::new(W, h);
+    root.setFrame(rect(0.0, 0.0, W, h));
+
+    // Buttons along the bottom.
+    let buttons = [("Copy hash", sel!(copyReceiptHash:)), ("Copy receipt", sel!(copyReceiptText:))];
+    let mut x = PAD;
+    for (title, action) in buttons {
+        let b = unsafe {
+            NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target), Some(action), mtm)
+        };
+        b.setTag(item.id as isize);
+        b.setContentTintColor(Some(&theme::neon()));
+        let w = b.fittingSize().width.max(96.0);
+        b.setFrame(rect(x, PAD, w, BTN_H));
+        root.addSubview(&b);
+        x += w + 8.0;
+    }
+
+    // Facts, bottom-up.
+    let mut y = PAD + BTN_H + 10.0;
+    for (label, value) in facts.iter().rev() {
+        let k = NSTextField::labelWithString(&NSString::from_str(label), mtm);
+        k.setFont(Some(&theme::mono(10.0)));
+        k.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        k.setFrame(rect(PAD, y, 84.0, ROW));
+        root.addSubview(&k);
+        let v = NSTextField::labelWithString(&NSString::from_str(value), mtm);
+        v.setFont(Some(&theme::mono(11.0)));
+        v.setTextColor(Some(&NSColor::labelColor()));
+        v.setSelectable(true);
+        v.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        v.setFrame(rect(PAD + 88.0, y, W - PAD * 2.0 - 88.0, ROW));
+        root.addSubview(&v);
+        y += ROW;
+    }
+
+    // The hash, large and selectable.
+    y += 8.0;
+    let hash = NSTextField::wrappingLabelWithString(&NSString::from_str(&sha_shown), mtm);
+    hash.setFont(Some(&theme::mono(12.5)));
+    hash.setTextColor(Some(&theme::neon()));
+    hash.setSelectable(true);
+    hash.setFrame(rect(PAD, y, W - PAD * 2.0, hash_h));
+    theme::glow(&hash, &theme::neon(), 4.0);
+    root.addSubview(&hash);
+
+    add_caption(mtm, &root, &format!("RECEIPT · SHA-256 · {}", item.content_type.label().to_uppercase()), W, true, Some(target));
+    (root, size)
+}
+
 fn add_caption(
     mtm: MainThreadMarker,
     root: &NSView,
@@ -486,6 +623,21 @@ fn clip_chars(s: &str, max: usize) -> String {
 /// The preview body for `item`, as it would appear, for headless snapshots.
 pub fn snapshot_view(mtm: MainThreadMarker, item: &ClipboardItem, expanded: bool) -> Retained<NSView> {
     build_content(mtm, item, expanded, None).0
+}
+
+/// The receipt panel on its dark backing, as it looks on screen.
+pub fn snapshot_receipt(mtm: MainThreadMarker, item: &ClipboardItem, receipt: &Receipt, target: &AnyObject) -> Retained<NSView> {
+    let (content, size) = build_receipt(mtm, item, receipt, target);
+    let back = theme::rounded_box(
+        mtm,
+        rect(0.0, 0.0, size.width, size.height),
+        RADIUS,
+        &NSColor::colorWithWhite_alpha(0.11, 1.0),
+        Some((&theme::with_alpha(&theme::neon(), 0.9), 1.2)),
+    );
+    back.setAppearance(theme::dark_appearance().as_deref());
+    back.addSubview(&content);
+    Retained::into_super(back)
 }
 
 /// At most one blank line in a row: pasted docs often open with several.
