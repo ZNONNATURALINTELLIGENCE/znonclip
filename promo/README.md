@@ -1,6 +1,8 @@
 # ZnonClip launch film
 
 [`znonclip-launch-1080p.mp4`](znonclip-launch-1080p.mp4): 54.4 s, 1920 x 1080, 30 fps, H.264 + AAC, with sound.
+[`znonclip-launch-voiceover-1080p.mp4`](znonclip-launch-voiceover-1080p.mp4): the same cut with a narrated voiceover (Kokoro-82M, voice
+`af_heart`, generated locally; the music dips under each line).
 Made with [HyperFrames](https://github.com/heygen-com/hyperframes) on 2026-10-24.
 
 Every ZnonClip screen in the film is the real app rendering itself, through its `ZNONCLIP_SNAPSHOT` mode, with
@@ -23,4 +25,5 @@ The video is **not** covered by the repository's MIT licence.
   [CC BY-NC 4.0](https://huggingface.co/facebook/musicgen-small) (non-commercial).
 - **Sound effects:** from [Pixabay](https://pixabay.com/sound-effects/), used under the
   [Pixabay Content License](https://pixabay.com/service/license-summary/).
+- **Voiceover:** [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache 2.0), voice `af_heart`.
 - **Fonts:** Inter and JetBrains Mono (SIL Open Font License).
