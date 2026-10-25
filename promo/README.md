@@ -3,6 +3,9 @@
 [`znonclip-launch-1080p.mp4`](znonclip-launch-1080p.mp4): 54.4 s, 1920 x 1080, 30 fps, H.264 + AAC, with sound.
 [`znonclip-launch-voiceover-1080p.mp4`](znonclip-launch-voiceover-1080p.mp4): the same cut with a narrated voiceover (Kokoro-82M, voice
 `af_heart`, generated locally; the music dips under each line).
+[`znonclip-launch-cyberpunk-1080p.mp4`](znonclip-launch-cyberpunk-1080p.mp4) is the same cut re-skinned as a cyberpunk
+film. It has a neon perspective grid, glass windows, a holographic rim on the real panel, glitch cuts, and a dubstep
+bed whose drop hits the ZnonClip reveal.
 Made with [HyperFrames](https://github.com/heygen-com/hyperframes) on 2026-10-24.
 
 Every ZnonClip screen in the film is the real app rendering itself, through its `ZNONCLIP_SNAPSHOT` mode, with
@@ -14,16 +17,18 @@ Every claim comes from the [main README](../README.md), except one. "9 µs to pr
 median of 2,000 release-mode runs of the open-path ranking code (paste-stats query + `predict()`, 40 clips) on
 Apple silicon. It was measured on 2026-10-23 with a temporary test that was not committed.
 
-Before it shipped, the film was reviewed and scored 10/10 by two non-Claude judges: Gemini 4 Argon and
-METAMORPHIOUS (Meta Muse Spark).
+Before they shipped, the film and its cyberpunk cut were each reviewed and scored 10/10 by two non-Claude judges:
+Gemini 4 Argon and METAMORPHIOUS (Meta Muse Spark).
 
 ## Licence notice for this folder
 
 The video is **not** covered by the repository's MIT licence.
 
 - **Music:** generated locally with Meta's MusicGen (`facebook/musicgen-small`), whose weights are licensed
-  [CC BY-NC 4.0](https://huggingface.co/facebook/musicgen-small) (non-commercial).
+  [CC BY-NC 4.0](https://huggingface.co/facebook/musicgen-small) (non-commercial). This covers the funky bed and the
+  cyberpunk cut's dubstep bed.
 - **Sound effects:** from [Pixabay](https://pixabay.com/sound-effects/), used under the
-  [Pixabay Content License](https://pixabay.com/service/license-summary/).
+  [Pixabay Content License](https://pixabay.com/service/license-summary/). The cyberpunk cut's riser and sub-drop are
+  synthesized; its glitch stabs are slices of a Pixabay effect.
 - **Voiceover:** [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache 2.0), voice `af_heart`.
-- **Fonts:** Inter and JetBrains Mono (SIL Open Font License).
+- **Fonts:** Inter, JetBrains Mono and, in the cyberpunk cut, Oswald (all SIL Open Font License).
