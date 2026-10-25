@@ -6,6 +6,9 @@
 [`znonclip-launch-cyberpunk-1080p.mp4`](znonclip-launch-cyberpunk-1080p.mp4) is the same cut re-skinned as a cyberpunk
 film. It has a neon perspective grid, glass windows, a holographic rim on the real panel, glitch cuts, and a dubstep
 bed whose drop hits the ZnonClip reveal.
+[`znonclip-launch-cyberpunk-vertical-1080x1350.mp4`](znonclip-launch-cyberpunk-vertical-1080x1350.mp4) is that cut in
+4:5 for X. Each scene is re-laid out top to bottom, not cropped. The scrub command is split with a shell line
+continuation (`\`), which is the same command.
 Made with [HyperFrames](https://github.com/heygen-com/hyperframes) on 2026-10-24.
 
 Every ZnonClip screen in the film is the real app rendering itself, through its `ZNONCLIP_SNAPSHOT` mode, with
@@ -18,7 +21,8 @@ median of 2,000 release-mode runs of the open-path ranking code (paste-stats que
 Apple silicon. It was measured on 2026-10-23 with a temporary test that was not committed.
 
 Before they shipped, the film and its cyberpunk cut were each reviewed and scored 10/10 by two non-Claude judges:
-Gemini 4 Argon and METAMORPHIOUS (Meta Muse Spark).
+Gemini 4 Argon and METAMORPHIOUS (Meta Muse Spark). For the vertical cut, Argon scored the final version 10/10.
+METAMORPHIOUS scored the version just before it 10/10; the final version adds only Argon's four layout fixes.
 
 ## Licence notice for this folder
 
